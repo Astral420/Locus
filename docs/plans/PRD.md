@@ -1,26 +1,26 @@
 # Locus — Product Requirements Document (PRD)
 
-> **Source of Truth** — This document defines *what* Locus does and *why*. For *how* it's built, see [DESIGN.md](file:///Volumes/Storage/DevShit/Locus/docs/plans/DESIGN.md). For engineering-level user stories and testing, see [SPEC.md](file:///Volumes/Storage/DevShit/Locus/docs/plans/SPEC.md).
+> **Source of Truth** — This document defines *what* Locus does and *why*. For *how* it's built, see [DESIGN.md](./DESIGN.md). For engineering-level user stories and testing, see [SPEC.md](./SPEC.md).
 
-**Version**: 1.0
-**Last Updated**: 2026-09-01
-**Status**: Approved
-**License**: Open Source (MIT or Apache 2.0)
+**Version**: 1.1
+**Last Updated**: 2026-09-05
+**Status**: Approved for implementation; engineering feasibility gates remain unverified
+**License**: MIT for original Locus code; third-party code and model licenses/notices remain separate
 
 ---
 
 ## 1. Product Vision
 
-**Locus is the open-source, offline-first meeting recorder that turns conversations into structured knowledge — without your data ever leaving your machine.**
+**Locus is the open-source, offline-first meeting recorder that turns conversations into structured knowledge, with local processing by default and explicit provider selection for remote AI.**
 
-Every meeting produces information that decays: action items are forgotten, deadlines are missed, decisions are relitigated. Cloud recording tools exist, but they require internet, send your data to third-party servers, and lock you into proprietary ecosystems. Locus eliminates all three problems by running the entire pipeline — recording, transcription, speaker identification, slide extraction, and AI summarization — locally on the user's device.
+Every meeting produces information that decays: action items are forgotten, deadlines are missed, decisions are relitigated. Cloud recording tools exist, but they require internet, send your data to third-party servers, and lock you into proprietary ecosystems. Locus eliminates all three problems by running recording, transcription, speaker identification, slide extraction, and AI summarization locally on the user's device. Capture, transcription, diarization, and slides work on a disconnected first launch. Local summarization and semantic search require model setup first; setup is skippable and supports local model import.
 
 ### Product Positioning
 
 | | Cloud Tools (Otter, Fireflies, etc.) | Locus |
 |---|---|---|
-| Data privacy | ❌ Data sent to cloud servers | ✅ Everything stays local |
-| Internet required | ❌ Always | ✅ Never (unless user opts into cloud AI) |
+| Data privacy | ❌ Data sent to cloud servers | ✅ Local by default; remote AI only when selected |
+| Internet required | ❌ Always | ✅ Offline after model setup; bundled capture/transcription available immediately |
 | Vendor lock-in | ❌ Proprietary formats | ✅ Open source, standard formats (MP4, Markdown, JSON) |
 | Cost | ❌ Monthly subscription | ✅ Free forever |
 | Slide extraction | ❌ Rarely supported | ✅ Built-in (OpenCV + OCR) |
@@ -67,9 +67,9 @@ Both personas need:
 
 ## 3. Product Principles
 
-1. **Local by default, cloud by choice** — Every feature works offline. Cloud APIs are an opt-in upgrade, never a requirement.
+1. **Local by default, cloud by choice** — All supported local processing works offline after its required models are provisioned. Generation and embedding model setup is skippable; cloud APIs are optional.
 2. **Capture everything, organize later** — The recording pipeline should be reliable and fire-and-forget. Organization (summaries, action items) happens automatically after the meeting.
-3. **Partial results are better than no results** — If one pipeline step fails (e.g., diarization crashes), everything else that succeeded is still available. Never lose data.
+3. **Partial results are better than no results** — If one pipeline step fails (e.g., diarization crashes), everything else that succeeded is still available. Preserve completed results and recoverable captured media; crash recovery targets at most the final five seconds of loss, subject to validated storage assumptions.
 4. **The user controls their data** — Standard formats (MP4, SQLite, Markdown). No proprietary lock-in. Export everything.
 5. **Smart defaults, full control** — Auto-detect language, auto-detect meeting type, auto-select GPU backend. But always let the user override.
 
@@ -91,8 +91,8 @@ Both personas need:
 | FR1.8 | The app shall display a live timer showing elapsed recording time | P0 |
 | FR1.9 | The app shall display a live audio level indicator during recording | P1 |
 | FR1.10 | The user shall be able to pause and resume recording | P1 |
-| FR1.11 | On stopping the recording, the app shall automatically encode the captured streams into an MP4 file (H.264 video + AAC audio) using the bundled ffmpeg | P0 |
-| FR1.12 | Recording capture shall use native platform APIs: ScreenCaptureKit (macOS), Windows Graphics Capture (Windows), PipeWire (Linux) | P0 |
+| FR1.11 | Encode continuously into recoverable media using bundled FFmpeg; stopping finalizes H.264/AAC MP4. Audio-only recordings contain AAC without a dummy video track | P0 |
+| FR1.12 | Native capture shall use ScreenCaptureKit plus microphone capture on macOS; Windows Graphics Capture for video plus WASAPI system-loopback/microphone audio; PipeWire audio and screen portal on Linux | P0 |
 | FR1.13 | The app shall capture system audio and microphone audio as **separate audio tracks** (not mixed), preserving per-source audio for downstream processing | P0 |
 | FR1.14 | On Linux, recording capture shall use PipeWire screen cast portal (Wayland) and PipeWire audio capture. Minimum requirement: PipeWire-enabled system (Ubuntu 22.04+, Fedora 34+, Arch Linux) | P0 |
 
@@ -104,14 +104,14 @@ Both personas need:
 | FR2.2 | Transcription shall produce timestamped text segments with start and end times | P0 |
 | FR2.3 | The app shall auto-detect the spoken language using Whisper's built-in language detection | P0 |
 | FR2.4 | The user shall be able to manually specify the language before recording via a dropdown | P1 |
-| FR2.5 | The app shall automatically select the best available GPU backend at runtime: Metal/CoreML (Apple Silicon), Vulkan/MoltenVK (Intel Mac + AMD GPU), CUDA (NVIDIA on Windows/Linux), ROCm/HIP (AMD on Windows/Linux), CPU (fallback) | P0 |
-| FR2.6 | The app shall bundle the Whisper `small` model (~250MB) for immediate out-of-box use | P0 |
+| FR2.5 | Select a validated GPU backend when available, with tested CPU fallback. Platform/backend combinations are qualified through engineering gates rather than inferred solely from GPU vendor | P0 |
+| FR2.6 | The app shall bundle the Whisper `small` model (466 MiB) for immediate out-of-box use | P0 |
 | FR2.7 | The app shall provide an in-app model manager where users can download additional models (`tiny`, `base`, `medium`, `large-v3`) | P1 |
 | FR2.8 | The model manager shall display estimated RAM/VRAM requirements per model | P2 |
 | FR2.9 | Transcription shall run post-recording only (not real-time), using VAD-guided chunking for optimal performance on long recordings (up to 3 hours) | P0 |
 | FR2.10 | The app shall run Voice Activity Detection (VAD) via pyannote before transcription to identify speech regions and skip silence | P0 |
 | FR2.11 | The app shall chunk audio into VAD-guided segments with a maximum chunk length of 5 minutes, splitting at low-energy points when a speech region exceeds the maximum | P0 |
-| FR2.12 | The model manager shall offer both standard and quantized (q5_0, q5_1, q8_0) variants of each Whisper model, showing size and quality tradeoffs | P1 |
+| FR2.12 | The model manager shall offer verified compatible standard/quantized Whisper variants (including q5_0, q5_1, q8_0 where supported), showing measured sizes and quality tradeoffs | P1 |
 
 ### FR3: Speaker Diarization
 
@@ -139,9 +139,10 @@ Both personas need:
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR5.1 | After transcription (and optionally diarization + slide extraction), the app shall generate an AI-powered summary | P0 |
-| FR5.2 | The app shall support **Ollama** as a local LLM provider (auto-detected at `localhost:11434`) | P0 |
-| FR5.3 | The app shall support **cloud API providers** (OpenAI, Anthropic) via user-provided API keys | P0 |
-| FR5.4 | The app shall use **keyword heuristics** on the transcript to auto-detect meeting type and select the appropriate summarization prompt | P1 |
+| FR5.2 | Bundle llama-server as the primary local generation engine; summarization weights are provisioned through skippable model setup, not bundled | P0 |
+| FR5.3 | Make loopback Ollama available when detected at localhost:11434; use it only when selected. Configurable non-loopback endpoints require remote-destination disclosure | P1 |
+| FR5.4 | The app shall support **cloud API providers** (OpenAI, Anthropic, Gemini) via user-provided API keys | P0 |
+| FR5.10 | The app shall use **keyword heuristics** on the transcript to auto-detect meeting type and select the appropriate summarization prompt | P1 |
 | FR5.5 | For **business meetings**, the summary shall include: overview, action items with deadlines and assignees, key decisions | P0 |
 | FR5.6 | For **lectures**, the summary shall include: overview, key concepts, assignments/homework, important dates | P0 |
 | FR5.7 | The user shall be able to override the auto-detected meeting type and re-run summarization with the corrected prompt | P1 |
@@ -156,7 +157,7 @@ Both personas need:
 | FR6.2 | The user shall be able to search meetings by title | P0 |
 | FR6.3 | The user shall be able to filter meetings by type (Meeting, Lecture, All) and date range | P1 |
 | FR6.4 | The user shall be able to delete meetings (including all associated files and data) | P0 |
-| FR6.5 | Each pipeline processing step shall display its own status (pending, running, done, error) independently | P0 |
+| FR6.5 | Persist independent step state and reason: pending, running, done, error, blocked, skipped, canceled; expose outdated successful outputs separately | P0 |
 | FR6.6 | The user shall be able to retry any individual failed pipeline step | P0 |
 
 ### FR7: Meeting Detail & Playback
@@ -186,7 +187,7 @@ Both personas need:
 |----|------------|----------|
 | FR9.1 | The user shall be able to select the active Whisper model and download additional models | P0 |
 | FR9.2 | The user shall be able to configure the LLM provider (Ollama URL, OpenAI API key, Anthropic API key, Gemini API key) | P0 |
-| FR9.3 | API keys shall be stored in the **OS keychain** (macOS Keychain, Windows Credential Manager) — not in plaintext | P0 |
+| FR9.3 | API keys shall use OS keychain storage on macOS, Windows, and Linux Secret Service. If unavailable or locked, explain the issue and keep local features usable; no plaintext fallback | P0 |
 | FR9.4 | The user shall be able to set default recording capture sources | P2 |
 | FR9.5 | The user shall be able to configure the storage location for recordings and data | P2 |
 | FR9.6 | The user shall be able to toggle between dark and light themes | P2 |
@@ -196,24 +197,45 @@ Both personas need:
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR10.1 | The app shall provide a Knowledge Base view (`/knowledge`) combining a document/meeting list with semantic search and a slide-in chat panel | P0 |
+| FR10.1 | The Knowledge Base (`/knowledge`) shall be chat-first, with a secondary thread sidebar, model/provider selector, semantic search, document management, and persistent indexing readiness | P0 |
 | FR10.2 | The user shall be able to upload supporting documents (PDF text extraction, Markdown, plain text) to the Knowledge Base | P0 |
 | FR10.3 | Uploaded documents shall be optionally linkable to one or more meetings | P1 |
-| FR10.4 | The app shall generate vector embeddings for transcript chunks, summaries, and uploaded documents using EmbeddingGemma-300M (bundled, via Rust ONNX Runtime) | P0 |
+| FR10.4 | Local embeddings shall use a GGUF embedding model via llama-server. A skippable setup flow offers download or local import; model sizes and progress are shown, and no model download is required to start recording | P0 |
 | FR10.5 | Embeddings shall be stored in ChromaDB (running in the Python sidecar) for similarity search | P0 |
 | FR10.6 | The Knowledge Base shall support semantic search across all meetings and documents ("find meetings where we discussed the pricing model") | P0 |
 | FR10.7 | The Knowledge Base shall include a chat interface where users can ask questions answered via RAG (retrieve relevant chunks → send to LLM with question) | P0 |
 | FR10.8 | The meeting detail view shall include an "Ask about this meeting" input for scoped Q&A using the meeting's transcript and linked documents | P1 |
-| FR10.9 | Embedding generation shall run as a silent background process after summarization, with toast notifications for status and errors | P1 |
+| FR10.9 | Transcript, slide-text, and document indexing shall start independently as each source becomes available; summary indexing follows when available. Work is durable and unobtrusive, with persistent readiness/errors and retry controls | P1 |
 | FR10.10 | The user shall be able to scope chat queries: "This meeting only", "All meetings", "Documents only", or "Everything" | P1 |
 
 ### FR11: Updates
 
 | ID | Requirement | Priority |
 |----|------------|----------|
-| FR11.1 | The app shall check for updates via Tauri's built-in updater when internet is available | P1 |
+| FR11.1 | Check the single stable update channel when enabled and online; install only with user action while capture and data-changing jobs are idle | P1 |
 | FR11.2 | Updates shall also be downloadable manually from GitHub Releases | P0 |
 | FR11.3 | The app shall never block or require an update to function (offline-first) | P0 |
+
+---
+
+### FR12: Reliability, Ownership, and Setup
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| FR12.1 | Require at least one audio source; allow microphone-only/in-person and audio-only sessions, reject all-off/screen-only setup, and mark video-only processing not applicable without video | P0 |
+| FR12.2 | Diarize microphone speech by default; an explicit “Only me on this microphone” setting may assign it to User. Never infer a person's identity from their device | P0 |
+| FR12.3 | Checkpoint recording continuously with a process-crash recovery target of at most the final five seconds lost; disk exhaustion, forced sleep, permission revocation or selected-source loss stop capture and preserve recoverable media | P0 |
+| FR12.4 | Closing the window keeps active capture running with persistent system controls to reopen, pause/resume and stop. Explicit quit offers Stop and save or Cancel; interruptions never silently restart capture | P0 |
+| FR12.5 | Exclude pauses from playback and duration. Warn at three hours without stopping automatically | P1 |
+| FR12.6 | Preserve previous successful outputs during replacement; retain previous summary revisions and their action completion state. Mark dependent results outdated and require explicit regeneration of an existing summary | P0 |
+| FR12.7 | Delete owned meeting content, vectors and scoped chats; unlink independent documents. Remove affected mixed-chat messages and dependent turns, fence in-flight jobs and retry incomplete cleanup. Previously exported files remain outside app control | P0 |
+| FR12.8 | Fix scope per chat thread; changing scope starts a new thread. This meeting includes linked documents. Permit explicit provider/model changes and show the destination | P0 |
+| FR12.9 | Require navigable evidence citations for chat answers and generated claims. Insufficient evidence is stated; unknown assignees/deadlines stay unknown | P0 |
+| FR12.10 | Accept text-bearing PDF/Markdown/plain text, initially ≤50 MiB each and PDFs ≤500 pages. Reject encrypted, image-only or oversized inputs clearly; recognize identical uploads without duplicate indexing | P0 |
+| FR12.11 | Bundle standard Whisper small read-only; default downloaded models to a configurable app-data models directory separate from meeting storage. Migrate managed downloads only while idle, verify copies before switching, preserve originals on failure, and handle missing drives as unavailable models | P1 |
+| FR12.12 | Give untitled meetings a date/time placeholder, then generate a concise title from the complete summary or bounded transcript passages spanning the session. User titles always win, including edits during generation; unavailable providers leave the placeholder | P1 |
+| FR12.13 | After optional diarization/OCR work terminates, generate an initial summary from available transcript with missing inputs disclosed. No speech produces an explicit empty result; transcription failure does not silently produce a slides-only summary | P0 |
+| FR12.14 | Offer skippable generation/embedding download or local import, with sizes/progress, cancel/retry, and offline/unavailable states. Verify model integrity and compatibility before activation | P0 |
 
 ---
 
@@ -221,12 +243,14 @@ Both personas need:
 
 ### Performance
 
+Timing and size numbers are benchmark targets, not established results. Record exact CPU/GPU, RAM, OS, model revision, language, duration, speech ratio, and concurrency for each measurement. Three hours is a validated-duration target, not a recording cutoff. Prefer bounded memory and capture durability when throughput targets conflict.
+
 | ID | Requirement | Target |
 |----|------------|--------|
-| NFR1 | Recording shall not cause dropped frames or audio glitches on a machine with ≥ 8GB RAM | 0 dropped frames per 60-minute recording |
+| NFR1 | Capture has resource priority on ≥8GB reference machines; suspend/defer heavy processing during recording, with default Balanced scheduling | No audio discontinuities attributable to the app; measure/report frame drops on defined 60-minute fixtures |
 | NFR2 | Transcription of a 60-minute recording shall complete within a reasonable time using the `small` model | ≤ 15 minutes on Apple M1, ≤ 25 minutes on CPU |
 | NFR2a | Transcription of a 3-hour recording shall complete using VAD-guided chunking | ≤ 45 minutes on Apple M1 (GPU), ≤ 75 minutes on CPU |
-| NFR2b | VAD pre-filtering shall reduce whisper processing time by ≥ 30% on recordings with significant silence | - |
+| NFR2b | Benchmark VAD benefit on a specified silence-bearing fixture against the same hardware/model without VAD | ≥30% improvement is a fixture-specific target, not a universal guarantee |
 | NFR3 | App cold start (launch to ready-to-record) | ≤ 5 seconds |
 | NFR4 | Meeting list load time (100 meetings) | ≤ 1 second |
 | NFR5 | Video seek + transcript sync response time | ≤ 200ms |
@@ -235,16 +259,16 @@ Both personas need:
 
 | ID | Requirement |
 |----|------------|
-| NFR6 | No user data shall be transmitted over the network unless the user explicitly configures a cloud LLM provider |
+| NFR6 | Content shall leave the device only for a request to an explicitly selected remote provider. Saving credentials does not select a provider; no automatic local-to-remote failover. Remote Ollama counts as remote |
 | NFR7 | No telemetry, analytics, or crash reporting shall be collected without explicit opt-in |
 | NFR8 | API keys shall be stored using OS-level secure credential storage (keychain) |
-| NFR9 | All meeting data (recordings, transcripts, summaries) shall be stored locally in the user's app data directory |
+| NFR9 | Meeting data defaults to local app data; users may configure a local data location. Downloaded model storage is independently configurable. Credentials remain in the OS keychain |
 
 ### Compatibility
 
 | ID | Requirement |
 |----|------------|
-| NFR10 | macOS: Support macOS 12.3+ (Monterey — required for ScreenCaptureKit) on both Apple Silicon and Intel |
+| NFR10 | macOS: Support macOS 13+ (Ventura, required for ScreenCaptureKit system audio) on Apple Silicon and Intel; use a separate microphone capture path where required |
 | NFR11 | Windows: Support Windows 10 1903+ (required for Windows Graphics Capture) on x64 |
 | NFR12 | Recordings shall be saved as standard MP4 (H.264 + AAC) playable in any media player |
 | NFR12a | Linux: Support Ubuntu 22.04+, Fedora 34+, and Arch Linux with PipeWire as the audio/screen capture backend. PipeWire is required; PulseAudio-only systems are not supported. |
@@ -253,8 +277,8 @@ Both personas need:
 
 | ID | Requirement | Target |
 |----|------------|--------|
-| NFR13 | Base app (Tauri + React + whisper-rs + ffmpeg + `small` model + EmbeddingGemma-300M) | ≤ 500MB |
-| NFR14 | Full app (base + Python sidecar with pyannote + OpenCV + Tesseract + ChromaDB) | ≤ 4.5GB |
+| NFR13 | Measure compressed installer size and installed footprint separately. Standard bundled Whisper `small` alone is 466 MiB on disk; generation and embedding models are provisioned separately | Budget set from packaging measurements; previous 400 MB base estimate withdrawn |
+| NFR14 | Full app includes sidecar dependencies, pyannote assets and Tesseract data. Downloaded generation/embedding models are additional | Initial 4.5 GB installed-footprint target, unverified until packaging spike |
 
 ### Accessibility
 
@@ -268,7 +292,7 @@ Both personas need:
 
 ## 6. System Architecture Summary
 
-> Full architecture details are in [DESIGN.md](file:///Volumes/Storage/DevShit/Locus/docs/plans/DESIGN.md).
+> Full architecture details are in [DESIGN.md](./DESIGN.md).
 
 ```mermaid
 graph TB
@@ -281,6 +305,9 @@ graph TB
         subgraph "Sidecar"
             PY["Python Binary<br/>(pyannote, OpenCV, Tesseract)"]
         end
+        subgraph "Llama Engine (Local)"
+            LLM["llama-server<br/>(Summarization & RAG)"]
+        end
         subgraph "External (Optional)"
             OL[Ollama]
         end
@@ -292,13 +319,14 @@ graph TB
     FE <-->|Tauri Commands| BE
     BE <-->|JSON-RPC 2.0| PY
     BE <--> DB
-    BE -.->|if configured| OL
-    BE -.->|if configured| CL
+    BE <-->|HTTP| LLM
+    BE -.->|when selected| OL
+    BE -.->|when selected| CL
 ```
 
 **Key architectural decisions:**
 - **Rust orchestrates everything** — recording, transcription (whisper-rs), pipeline management, database, IPC
-- **Python sidecar is thin** — only ML workloads (pyannote, OpenCV, Tesseract), no orchestration
+- **Python sidecar** — ML workloads and persistent ChromaDB storage; Rust owns orchestration
 - **JSON-RPC 2.0 over stdin/stdout** — structured communication between Rust and Python
 - **SQLite** — single-file database, zero configuration, offline-first
 
@@ -308,7 +336,7 @@ graph TB
 
 ### Recording
 
-- [ ] User can start a recording with ≤ 2 interactions (open record view → press record)
+- [ ] After required OS permissions/source selection are established, user can start with ≤ 2 interactions (open record view → press record); first-use OS permission dialogs are separate
 - [ ] System audio, microphone, and screen can be independently toggled
 - [ ] Recording produces a valid MP4 file playable in the app's video player
 - [ ] Pausing and resuming produces a continuous final recording without gaps or artifacts
@@ -327,7 +355,7 @@ graph TB
 - [ ] A 2-speaker audio file produces segments attributed to 2 distinct speaker labels
 - [ ] Speaker labels are consistent (the same voice always gets the same label within a meeting)
 - [ ] Speaker colors are visually distinct in the transcript view
-- [ ] Renaming a speaker updates all transcript lines, the summary, and action item assignees
+- [ ] Renaming a speaker updates structured speaker references in transcript, rendered summary, and action-item assignees without rewriting unrelated free text or resetting completion
 - [ ] If diarization fails, the transcript is displayed without speaker labels (graceful degradation)
 
 ### Slide Extraction
@@ -344,14 +372,14 @@ graph TB
 - [ ] Auto-detection correctly classifies a business meeting transcript (containing "deadline", "action item", "stakeholder" keywords)
 - [ ] Auto-detection correctly classifies a lecture transcript (containing "assignment", "exam", "chapter" keywords)
 - [ ] Overriding the meeting type and re-summarizing produces a different summary format
-- [ ] If Ollama is not running and no API key is configured, the app shows a clear message and the transcript/slides remain viewable
+- [ ] If the selected generation engine fails, transcript/slides and prior successful summaries remain viewable; configured alternatives are offered for explicit selection and never used automatically
 
 ### Pipeline Resilience
 
-- [ ] Each pipeline step shows its independent status (pending/running/done/error) in the UI
+- [ ] Each pipeline step shows its independent state/reason, including blocked/skipped/canceled; outdated output remains distinguishable from a failed attempt
 - [ ] A failed diarization step does not prevent the transcript from being viewed
 - [ ] A failed summarization step does not prevent transcript or slides from being viewed
-- [ ] Retrying a failed step re-runs only that step, not the entire pipeline
+- [ ] Retry re-runs the selected step and invalidates affected descendants without repeating unaffected upstream work; last successful outputs remain available, and existing summaries require explicit regeneration
 - [ ] Progress percentage updates are reflected in the UI during long-running steps
 
 ### Export
@@ -366,7 +394,23 @@ graph TB
 - [ ] Semantic search for a phrase discussed in a past meeting returns that meeting
 - [ ] Chat query "What did we decide about X?" retrieves relevant transcript chunks and produces an LLM answer
 - [ ] Documents can be linked to specific meetings and appear in the meeting detail view
-- [ ] Embedding generation completes silently after summarization with a toast notification
+- [ ] Sources become searchable independently of summary success; indexing readiness and failed-job retry survive navigation and app restart
+
+### Additional Required Scenarios
+
+- [ ] Force-kill capture at varied checkpoint boundaries; recovered playback loses at most five seconds under tested storage conditions, and prior segments remain intact
+- [ ] Disk full, forced sleep, permission/source loss, close-to-background, explicit quit and recovery have distinct tested outcomes
+- [ ] Pause/resume audio and video share a continuous media timeline; three hours warns without an automatic stop
+- [ ] A personal microphone setting differs from a microphone recording several people; overlapping speech is not assigned a fabricated identity
+- [ ] A retry racing deletion cannot resurrect content; mixed-source chat cleanup also removes dependent turns
+- [ ] Failed re-summarization preserves the previous summary and checked items; speaker rename updates structured references safely
+- [ ] Offline first launch supports all bundled features; missing generation/embedding models do not block recording
+- [ ] Saving a remote key never sends meeting data; only selecting that provider enables disclosed requests, including titles and retrieved chat context
+- [ ] Scope changes create a new chat; citations remain navigable and unsupported answers acknowledge insufficient evidence
+- [ ] Model-folder migration failure or unplugging a model drive preserves originals and capture capability
+- [ ] Late automatic-title results cannot overwrite a user rename; short and long recordings receive whole-session context when available
+- [ ] Scanned/encrypted/oversized documents show actionable rejection; byte-identical imports do not duplicate indexed content
+- [ ] Automated critical frontend flows and backend contract/recovery tests pass; per-platform capture/GPU manual evidence accompanies release qualification
 
 ### Linux Recording
 
@@ -386,6 +430,8 @@ graph TB
 ## 8. Success Metrics
 
 ### Adoption (post-launch)
+
+No v1 telemetry is added to measure these ambitions. Use public repository/release statistics and voluntary reports; active-install counts and population crash rates are not directly measurable without a separately approved collection design.
 
 | Metric | Target (6 months) |
 |--------|--------------------|
@@ -418,15 +464,17 @@ graph TB
 
 **Goal**: Record → Transcribe → Diarize → Summarize → Knowledge Base → View (all platforms)
 
+One stable release channel. Develop the complete feature set on macOS, then port to Linux and Windows; development builds support testing, with no maintained public alpha/beta channel. v1.0 requires all three platforms to pass release qualification. The executable work breakdown and model assignments live in [IMPLEMENTATION.md](./IMPLEMENTATION.md).
+
 | Milestone | Scope |
 |-----------|-------|
 | **M1: Skeleton** | Tauri + React shell, SQLite schema, Python sidecar scaffolding, monorepo CI |
 | **M2: Recording** | macOS ScreenCaptureKit, separate audio tracks (mic + system), ffmpeg encoding |
 | **M3: Transcription** | whisper-rs integration, pyannote VAD, VAD-guided chunking (5-min max), GPU backend detection, model manager (standard + quantized variants) |
-| **M4: Diarization + Slides** | pyannote sidecar (separate track routing: mic="User"), OpenCV headless slide detection, Tesseract OCR |
-| **M5: Summarization** | Ollama + cloud API integration, prompt routing, action item extraction |
+| **M4: Diarization + Slides** | pyannote source-aware diarization (multi-speaker mic by default, explicit personal-mic option), OpenCV headless slides, Tesseract OCR |
+| **M5: Summarization** | Managed llama-server, optional selected Ollama/cloud providers, context budgeting, versioned summaries/action items, citations, automatic titles |
 | **M6: Meeting Detail** | Video playback, transcript sync, summary view, slides gallery |
-| **M7: Knowledge Base** | ChromaDB integration, EmbeddingGemma-300M (ONNX), document upload (PDF/MD/TXT), semantic search, chat panel, document-meeting linking |
+| **M7: Knowledge Base** | GGUF embeddings via llama-server, durable independent indexing, ChromaDB, PDF/MD/TXT ingestion, cited scoped chat, thread persistence, document linking and deletion |
 | **M8: Polish + Export** | Search/filter, export (clipboard/MD/PDF/JSON), settings, auto-update |
 | **M9: Linux** | PipeWire capture (audio + screen), AppImage + Flatpak packaging, Secret Service keychain, Linux CI |
 | **M10: Windows** | Windows Graphics Capture, CUDA/ROCm builds, exe installer |
@@ -436,6 +484,7 @@ graph TB
 - Real-time transcription during recording
 - Dashboard with stats and deadline tracking
 - Calendar view
+- Image context: standalone images and images embedded in supported documents, including OCR and visual understanding of charts, diagrams, and screenshots with image/page citations. Formats, models, and resource limits require a v2 specification.
 
 ### Phase 3: Advanced (v3.0)
 
@@ -452,12 +501,12 @@ graph TB
 |------|--------|------------|------------|
 | **PyInstaller sidecar is 2-4 GB** | Large download, slow install | High | Sidecar uses OpenCV headless to reduce size. Accept ~4-4.5GB install for full offline AI pipeline. |
 | **Vulkan + MoltenVK untested for whisper.cpp** | Intel Mac + AMD GPU users fall back to slow CPU | Medium | Prototype early. CPU fallback always works. Document GPU requirements. |
-| **pyannote model license incompatible** | Can't bundle model in MIT/Apache app | Low | Community model has permissive license. Review terms. If blocked, ship without diarization and require user to download model separately. |
-| **ffmpeg GPL contamination** | License conflict with MIT/Apache project | Medium | Use LGPL-only ffmpeg build with hardware encoders. Verify at build time. |
+| **Bundled asset redistribution or offline loading fails verification** | First-launch diarization promise cannot be met | Unverified | Verify exact model revisions, dependencies, notices, and network-free loading before implementation depends on them. Surface a blocked release requirement rather than silently removing bundled diarization. |
+| **Encoding/distribution compatibility** | H.264 unavailable on a target machine or incomplete third-party compliance | Unverified | Pin and audit the exact FFmpeg build; validate hardware paths and a distributable fallback on supported platforms. Record notices and build sources separately from Locus's MIT license. |
 | **Cross-platform capture divergence** | macOS and Windows capture APIs differ significantly | High | Abstract behind a trait. Implement macOS first (simpler API). Budget extra time for Windows. Accept some feature asymmetry initially. |
 | **Whisper transcription quality on long recordings** | Accuracy degrades on 2+ hour recordings | Medium | Chunk audio into segments before transcription. Display confidence scores. Users can select larger models for better accuracy. |
-| **Ollama not installed** | User has no LLM available on first launch | Medium | Clear in-app messaging: "Install Ollama for local AI, or add a cloud API key." Link to Ollama download page. Transcript is still useful without summary. |
-| **PipeWire not available on older Linux** | Linux users on PulseAudio-only can't record | Medium | Document PipeWire requirement clearly. Target modern distros only (Ubuntu 22.04+, Fedora 34+). PipeWire adoption is near-universal on modern Linux. |
+| **Generation model not provisioned** | Summarization unavailable on first launch | High | Skippable model download/import setup; keep capture, transcript and slides usable. User may explicitly select another configured provider. |
+| **PipeWire not available on older Linux** | Linux users on PulseAudio-only can't record | Medium | Document PipeWire requirement clearly. Target modern distros only (Ubuntu 22.04+, Fedora 34+). Validate actual PipeWire audio and portal capability per target desktop. |
 | **ChromaDB adds complexity to sidecar** | Sidecar is no longer thin, lifecycle management needed | Low | On-demand sidecar lifecycle with warm-up. ChromaDB persists to disk. Sidecar starts lazily and stays running while app is open. |
 
 ---
@@ -467,7 +516,7 @@ graph TB
 1. **No accounts or authentication** — Locus has no user accounts, no login, no cloud backend. Everything is local.
 2. **No telemetry by default** — No data collection unless the user explicitly opts in (and opt-in doesn't exist in v1).
 3. **No subscription or payment** — Locus is free and open source. Revenue model (if any) is deferred to v3+ via open-core premium features.
-4. **macOS 12.3+ minimum** — Required by ScreenCaptureKit. Older macOS versions are not supported.
+4. **macOS 13+ minimum** — Required by ScreenCaptureKit system-audio capture. Older macOS versions are not supported.
 5. **Windows 10 1903+ minimum** — Required by Windows Graphics Capture API.
 6. **Python sidecar is opaque to the user** — The user never sees Python, pip, or any Python artifacts. The sidecar is a standalone binary.
 7. **Linux requires PipeWire** — PulseAudio-only and bare X11 systems without PipeWire are not supported.
@@ -477,6 +526,8 @@ graph TB
 
 ## 12. Glossary
 
+Canonical product terminology lives in [CONTEXT.md](../../CONTEXT.md). The following table explains supporting technologies; domain definitions in CONTEXT take precedence for terminology.
+
 | Term | Definition |
 |------|-----------|
 | **Diarization** | The process of identifying and labeling which speaker spoke when in an audio recording |
@@ -485,19 +536,19 @@ graph TB
 | **pyannote** | An open-source Python library for speaker diarization and voice activity detection |
 | **Sidecar** | A secondary process that runs alongside the main Tauri app, in this case a PyInstaller-packaged Python binary |
 | **JSON-RPC 2.0** | A stateless, lightweight remote procedure call protocol encoded in JSON, used for Rust ↔ Python communication |
-| **Pipeline** | The sequence of processing steps applied to a recording: encode → transcribe → diarize → slides → OCR → summarize |
-| **Ollama** | An open-source tool for running large language models locally on a user's machine |
-| **ScreenCaptureKit** | Apple's macOS framework for capturing screen content and system audio (macOS 12.3+) |
+| **Pipeline** | Recoverable media finalization and dependent transcription, diarization, slide/OCR and generation jobs; source indexing has an independent lifecycle |
+| **Llama.cpp** | An open-source inference engine used as Locus's primary backend for local text generation and embeddings |
+| **Ollama** | An open-source tool for running large language models locally on a user's machine, supported as a fallback |
+| **ScreenCaptureKit** | Apple's macOS framework for capturing screen content and system audio (macOS 13+) |
 | **Windows Graphics Capture** | Microsoft's API for capturing screen content on Windows 10+ |
 | **OCR** | Optical Character Recognition — extracting text from images |
 | **RAG** | Retrieval-Augmented Generation — enhancing LLM responses with relevant documents retrieved from a vector database |
 | **Prompt routing** | Automatically selecting the appropriate LLM prompt template based on detected meeting type |
 | **Meeting type** | Classification of a recording as either a "business meeting" (→ action items, deadlines) or a "lecture" (→ study notes, key concepts) |
 | **ChromaDB** | An open-source vector database used for storing and querying document/transcript embeddings in the Knowledge Base |
-| **EmbeddingGemma-300M** | A 300M-parameter embedding model from Google, used to convert text into vector representations for semantic search |
+| **Model Catalog** | A curated JSON list of approved GGUF models hosted on GitHub, serving as the storefront for the in-app Model Manager |
 | **VAD** | Voice Activity Detection — identifying which portions of an audio recording contain speech vs. silence |
 | **PipeWire** | A modern Linux multimedia framework for audio and video capture, replacing PulseAudio and JACK |
-| **ONNX Runtime** | A cross-platform inference engine for running ML models exported in the ONNX format |
 | **Semantic search** | Finding content by meaning rather than exact keyword matching, powered by vector embeddings and similarity search |
 
 ---
