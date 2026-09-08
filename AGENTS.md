@@ -9,6 +9,7 @@ Locus is a planned offline-first desktop meeting library. This repository curren
 - `docs/plans/SPEC.md`: observable behavior and acceptance contracts.
 - `docs/plans/DESIGN.md`: architecture, including planned Rust/Tauri, React/TypeScript, and Python sidecar boundaries.
 - `docs/plans/IMPLEMENTATION.md`: ordered tasks, owners, feasibility gates, and completion criteria.
+- `docs/plans/ORCHESTRATION.md`: read when configuring oh my pi, dispatching tasks, checking progress, reviewing or resuming implementation; defines TDD checkpoints and escalation.
 - `docs/adr/`: architectural decisions, named `NNNN-kebab-case-title.md`.
 
 
@@ -20,7 +21,7 @@ Before implementation, read the relevant PRD requirements, SPEC contracts and DE
 
 Preserve working functionality and the user's existing edits. Keep changes limited to the requested feature/fix; do not refactor unrelated code, change public behavior incidentally, or add speculative abstractions. Follow established module boundaries, naming and patterns; establish missing conventions in the relevant scaffold.
 
-For AI-assisted implementation, all frontend work belongs to **Gemini 3.8 Flash High with impeccable**, including UI design, React/TypeScript, frontend configuration, wrappers, accessibility and frontend tests. Follow the installed skill without overwriting the architectural DESIGN document. Backend work uses **GPT-5.6 Sol/Terra/Luna or GPT-6 Astra**, with per-task reasoning tiers and ownership in IMPLEMENTATION. Resolve unavailable models with the maintainer rather than silently substituting. Human contributors follow the same contracts and quality gates without a model requirement.
+For AI-assisted implementation, all frontend work belongs to **Gemini 3.8 Flash High with impeccable**, including UI design, React/TypeScript, frontend configuration, wrappers, accessibility and frontend tests. Follow the installed skill without overwriting the architectural DESIGN document. Backend execution defaults to **GPT-5.6 Luna xhigh**, with **GPT-6 Astra low or GPT-5.6 Sol high** for complicated tasks, per IMPLEMENTATION. The oh my pi orchestrator uses **GPT-6 Astra medium/low**; independent backend review uses **GPT-5.6 Sol medium/high**. Follow ORCHESTRATION's TDD checkpoints. Resolve unavailable models with the maintainer rather than silently substituting. Human contributors follow the same contracts and quality gates without a model requirement.
 
 ## Build, Test, and Development Commands
 
