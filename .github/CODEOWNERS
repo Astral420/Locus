@@ -1,0 +1,4 @@
+* @locus-maintainers
+src-tauri/ @locus-backend
+src/ @locus-frontend
+docs/release/ @locus-maintainers

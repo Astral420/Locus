@@ -1,0 +1,8 @@
+# Runtime dependency set for the packaged sidecar. Versions are pinned after the
+# Python/PyTorch/pyannote feasibility run; foundation tests use stdlib fallbacks.
+numpy>=1.26,<3
+opencv-python-headless>=4.10,<5
+Pillow>=10,<12
+pytesseract>=0.3.13,<1
+chromadb>=0.5,<2
+pyannote.audio>=3.3,<4

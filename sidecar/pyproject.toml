@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "locus-sidecar"
+version = "0.1.0"
+description = "Offline ML sidecar for Locus"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+runtime = [
+  "numpy>=1.26",
+  "opencv-python-headless>=4.10",
+  "Pillow>=10.0",
+  "pytesseract>=0.3.13",
+  "chromadb>=0.5",
+  "pyannote.audio>=3.3"
+]
+
+[tool.setuptools]
+packages = ["sidecar", "sidecar.src", "sidecar.src.rpc", "sidecar.src.diarization", "sidecar.src.slides", "sidecar.src.vectordb", "sidecar.src.utils"]

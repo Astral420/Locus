@@ -1,0 +1,26 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.25.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: stable, components: rustfmt, clippy }
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm build
+      - run: pnpm test
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: pnpm tauri build --debug --bundles nsis

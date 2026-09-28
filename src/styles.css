@@ -1,0 +1,214 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root,
+[data-theme="light"] {
+  /* Surfaces & Grounds */
+  --color-bg: oklch(0.978 0.006 85.0);           /* #FAF8F5 - Warm architectural paper ground */
+  --color-surface: oklch(0.952 0.008 85.0);      /* #F3EFEA - Linen card & pane container */
+  --color-surface-elevated: oklch(1.0 0 0);      /* #FFFFFF - Pure white elevated panels, dropdowns, modals */
+  --color-surface-sunken: oklch(0.935 0.010 85.0); /* #EBE6DF - Sunken gutters, scroll tracks */
+
+  /* Borders & Hairlines */
+  --color-border: oklch(0.902 0.010 85.0);       /* #E5E0D6 - Subtle 1px structural dividing lines */
+  --color-border-subtle: oklch(0.925 0.008 85.0);/* #ECE7DE - Muted internal cell dividers */
+  --color-border-active: oklch(0.612 0.118 158.0);/* #419873 - Focused & selected borders */
+
+  /* Typography & Ink */
+  --color-ink: oklch(0.185 0.012 160.0);         /* #19211D - Deep botanical pine-charcoal (13.8:1 contrast) */
+  --color-ink-muted: oklch(0.485 0.012 160.0);   /* #5D6862 - Secondary copy, timestamps, captions (4.8:1) */
+  --color-ink-subtle: oklch(0.650 0.010 160.0);  /* #89938D - De-emphasized placeholders, inactive icons */
+
+  /* Signature Brand & Accent Greens */
+  --color-primary: oklch(0.612 0.118 158.0);     /* #419873 - Primary evergreen action fill */
+  --color-primary-hover: oklch(0.570 0.125 158.0);/* #388463 - Primary button hover */
+  --color-accent: oklch(0.672 0.132 158.0);      /* #49AB81 - Interactive hover & secondary controls */
+  --color-mint: oklch(0.735 0.144 158.0);        /* #52BF90 - Luminous transcript bar & level peak */
+  --color-green-text: oklch(0.420 0.095 158.0);  /* #265C44 - High-contrast green text/badges (6.2:1) */
+  --color-green-tint: oklch(0.945 0.035 158.0);  /* #E2F3EB - Soft badge background / line highlight fill */
+
+  /* Functional Status Roles */
+  --color-status-recording: oklch(0.62 0.22 25.0); /* #E53935 - Recording pulse beacon (crimson) */
+  --color-status-success: oklch(0.58 0.14 150.0);  /* #2E7D32 - Done & completed */
+  --color-status-warning: oklch(0.72 0.16 75.0);   /* #D97706 - Outdated result / warning */
+  --color-status-error: oklch(0.55 0.20 28.0);     /* #C53030 - Error state / pipeline failure */
+  --color-status-pending: oklch(0.68 0.02 85.0);   /* #9CA3AF - Idle / queued / skipped */
+
+  /* Speaker Diarization Palette (Light) */
+  --speaker-1-label: #265c44;
+  --speaker-1-pill: #e2f3eb;
+  --speaker-2-label: #2b5b84;
+  --speaker-2-pill: #e3edf5;
+  --speaker-3-label: #7a4b27;
+  --speaker-3-pill: #f5ece3;
+  --speaker-4-label: #6b3d6b;
+  --speaker-4-pill: #f3e8f3;
+  --speaker-5-label: #2c6661;
+  --speaker-5-pill: #e2f0ef;
+  --speaker-6-label: #73561e;
+  --speaker-6-pill: #f4efe0;
+  --speaker-7-label: #525866;
+  --speaker-7-pill: #eaecef;
+}
+
+[data-theme="dark"] {
+  /* Surfaces & Grounds */
+  --color-bg: oklch(0.150 0.010 160.0);           /* #111614 - Deep obsidian slate ground */
+  --color-surface: oklch(0.200 0.012 160.0);      /* #18201C - Studio panel & card surface */
+  --color-surface-elevated: oklch(0.245 0.015 160.0);/* #202A25 - Elevated modals, popovers, dropdowns */
+  --color-surface-sunken: oklch(0.125 0.008 160.0); /* #0C100F - Sunken gutters & input fields */
+
+  /* Borders & Hairlines */
+  --color-border: oklch(0.290 0.015 160.0);       /* #28352F - Subtle dark dividing hairlines */
+  --color-border-subtle: oklch(0.230 0.012 160.0);/* #1E2723 - Internal cell dividers */
+  --color-border-active: oklch(0.735 0.144 158.0);/* #52BF90 - Luminous mint active border */
+
+  /* Typography & Ink */
+  --color-ink: oklch(0.960 0.005 160.0);         /* #F0F3F1 - Crisp off-white body copy (14.5:1 contrast) */
+  --color-ink-muted: oklch(0.670 0.015 160.0);   /* #8E9C95 - Secondary text & timestamps (6.1:1) */
+  --color-ink-subtle: oklch(0.480 0.012 160.0);  /* #57635D - Muted icons & placeholders */
+
+  /* Signature Brand & Accent Greens */
+  --color-primary: oklch(0.735 0.144 158.0);     /* #52BF90 - Luminous mint action fill */
+  --color-primary-hover: oklch(0.780 0.150 158.0);/* #66D4A4 - Hover state */
+  --color-accent: oklch(0.672 0.132 158.0);      /* #49AB81 - Secondary accent */
+  --color-mint: oklch(0.735 0.144 158.0);        /* #52BF90 - High-contrast indicators */
+  --color-green-text: oklch(0.780 0.130 158.0);  /* #64D6A2 - Accessible green text in dark mode */
+  --color-green-tint: oklch(0.250 0.050 158.0);  /* #173629 - Dark green pill fill */
+
+  /* Functional Status Roles */
+  --color-status-recording: oklch(0.68 0.22 25.0); /* #EF4444 */
+  --color-status-success: oklch(0.68 0.16 150.0);  /* #34D399 */
+  --color-status-warning: oklch(0.78 0.16 75.0);   /* #FBBF24 */
+  --color-status-error: oklch(0.65 0.20 28.0);     /* #F87171 */
+  --color-status-pending: oklch(0.50 0.02 160.0);  /* #6B7280 */
+
+  /* Speaker Diarization Palette (Dark) */
+  --speaker-1-label: #64d6a2;
+  --speaker-1-pill: #173629;
+  --speaker-2-label: #78b3e4;
+  --speaker-2-pill: #1a2f42;
+  --speaker-3-label: #e09a64;
+  --speaker-3-pill: #3d2717;
+  --speaker-4-label: #c688c6;
+  --speaker-4-pill: #351d35;
+  --speaker-5-label: #6cc7bf;
+  --speaker-5-pill: #163330;
+  --speaker-6-label: #d6ae56;
+  --speaker-6-pill: #3a2b0f;
+  --speaker-7-label: #a3abb8;
+  --speaker-7-pill: #252830;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    /* Surfaces & Grounds */
+    --color-bg: oklch(0.150 0.010 160.0);
+    --color-surface: oklch(0.200 0.012 160.0);
+    --color-surface-elevated: oklch(0.245 0.015 160.0);
+    --color-surface-sunken: oklch(0.125 0.008 160.0);
+
+    /* Borders & Hairlines */
+    --color-border: oklch(0.290 0.015 160.0);
+    --color-border-subtle: oklch(0.230 0.012 160.0);
+    --color-border-active: oklch(0.735 0.144 158.0);
+
+    /* Typography & Ink */
+    --color-ink: oklch(0.960 0.005 160.0);
+    --color-ink-muted: oklch(0.670 0.015 160.0);
+    --color-ink-subtle: oklch(0.480 0.012 160.0);
+
+    /* Signature Brand & Accent Greens */
+    --color-primary: oklch(0.735 0.144 158.0);
+    --color-primary-hover: oklch(0.780 0.150 158.0);
+    --color-accent: oklch(0.672 0.132 158.0);
+    --color-mint: oklch(0.735 0.144 158.0);
+    --color-green-text: oklch(0.780 0.130 158.0);
+    --color-green-tint: oklch(0.250 0.050 158.0);
+
+    /* Functional Status Roles */
+    --color-status-recording: oklch(0.68 0.22 25.0);
+    --color-status-success: oklch(0.68 0.16 150.0);
+    --color-status-warning: oklch(0.78 0.16 75.0);
+    --color-status-error: oklch(0.65 0.20 28.0);
+    --color-status-pending: oklch(0.50 0.02 160.0);
+
+    /* Speaker Diarization Palette (Dark) */
+    --speaker-1-label: #64d6a2;
+    --speaker-1-pill: #173629;
+    --speaker-2-label: #78b3e4;
+    --speaker-2-pill: #1a2f42;
+    --speaker-3-label: #e09a64;
+    --speaker-3-pill: #3d2717;
+    --speaker-4-label: #c688c6;
+    --speaker-4-pill: #351d35;
+    --speaker-5-label: #6cc7bf;
+    --speaker-5-pill: #163330;
+    --speaker-6-label: #d6ae56;
+    --speaker-6-pill: #3a2b0f;
+    --speaker-7-label: #a3abb8;
+    --speaker-7-pill: #252830;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 960px;
+  background-color: var(--color-bg);
+  color: var(--color-ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-size: 14px;
+  line-height: 22px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular figures for monospace elements, timestamps, and levels */
+.font-mono,
+.tabular-nums,
+[data-tabular="true"] {
+  font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Accessibility focus-visible ring */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Mechanical smooth transitions */
+.transition-mechanical {
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Recording Pulse Beacon */
+@keyframes recording-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.92);
+  }
+}
+
+.animate-recording-pulse {
+  animation: recording-pulse 2s infinite ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-recording-pulse {
+    animation: none;
+    opacity: 1;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

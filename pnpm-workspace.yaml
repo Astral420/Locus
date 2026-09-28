@@ -1,0 +1,10 @@
+packages:
+  - "."
+allowBuilds:
+  "@astryxdesign/core": true
+  core-js: true
+  "esbuild": true
+onlyBuiltDependencies:
+  - esbuild
+  - "@astryxdesign/core"
+  - core-js

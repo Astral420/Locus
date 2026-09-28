@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Locus",
+  "version": "0.1.0",
+  "identifier": "com.locus.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "CI=true pnpm build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "Locus", "width": 1200, "height": 760, "minWidth": 960, "minHeight": 640, "resizable": true }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "appimage", "nsis"],
+    "icon": ["icons/icon.png"],
+    "category": "Productivity",
+    "shortDescription": "Offline-first meeting library",
+    "longDescription": "Record, transcribe, diarize, summarize, and search meetings locally.",
+    "resources": ["../models", "../sidecar/dist"]
+  }
+}

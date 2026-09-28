@@ -1,0 +1,16 @@
+name: build-macos
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, main]
+jobs:
+  debug-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.25.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm tauri build --debug
