@@ -19,16 +19,21 @@ pub fn start_recording(
     title: Option<String>,
     single_person_mic: Option<bool>,
 ) -> Result<RecordingStateDto, String> {
+    // Recordings are played back through the asset protocol, which needs absolute paths.
+    std::fs::create_dir_all(&state.media_root).map_err(|e| e.to_string())?;
+    let output_root = state.media_root.canonicalize().map_err(|e| e.to_string())?;
     let options = CaptureOptions {
         sources,
         meeting_type,
         single_person_mic: single_person_mic.unwrap_or(false),
         title: title.unwrap_or_default(),
-        output_root: state.media_root.clone(),
+        output_root,
     };
     preflight::validate_storage(&options).map_err(|e| e.to_string())?;
     #[cfg(target_os = "linux")]
     crate::capture::linux::preflight(&options).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    crate::capture::macos::preflight(&options).map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     crate::capture::windows::preflight(&options).map_err(|e| e.to_string())?;
     state.capture.start(options).map_err(|e| e.to_string())

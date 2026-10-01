@@ -219,3 +219,60 @@ pub fn get_slides(state: State<'_, AppState>, meeting_id: String) -> Result<Vec<
         })
         .map_err(|e| e.to_string())
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MeetingMediaDto {
+    pub path: Option<String>,
+    pub has_video: bool,
+    pub duration_seconds: f64,
+}
+
+/// Resolves the playable recording for a meeting as an absolute path that the
+/// webview can load through the asset protocol. Returns `None` when nothing was
+/// captured (or the file has since been removed).
+#[tauri::command]
+pub fn get_meeting_media(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> Result<Option<MeetingMediaDto>, String> {
+    let row = state
+        .database
+        .run(move |connection| {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT s.relative_path, s.duration_seconds FROM media_segments s \
+                     JOIN capture_manifests m ON m.id = s.manifest_id \
+                     WHERE m.meeting_id = ?1 AND s.source = 'mixed' \
+                     ORDER BY m.capture_generation DESC, s.ordinal ASC LIMIT 1",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt
+                .query_map([&meeting_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.next().transpose().map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.to_string())?;
+    let Some((relative_path, duration_seconds)) = row else {
+        return Ok(None);
+    };
+    let root = state.media_root.canonicalize().map_err(|e| e.to_string())?;
+    let candidate = root.join(&relative_path);
+    // Stay inside the media root even if a stored path is malformed.
+    let Ok(resolved) = candidate.canonicalize() else {
+        return Ok(None);
+    };
+    if !resolved.starts_with(&root) || !resolved.is_file() {
+        return Ok(None);
+    }
+    let has_video = matches!(
+        resolved.extension().and_then(|e| e.to_str()),
+        Some("mp4" | "webm" | "mov" | "mkv")
+    );
+    Ok(Some(MeetingMediaDto {
+        path: Some(resolved.to_string_lossy().to_string()),
+        has_video,
+        duration_seconds,
+    }))
+}

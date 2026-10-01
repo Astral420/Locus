@@ -22,3 +22,4 @@ node_modules/
 target/
 src-tauri/gen/
 .pytest_cache/
+src-tauri/media/

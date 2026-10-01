@@ -5,6 +5,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { useRecordingStore } from "../stores/recordingStore";
+import { formatElapsed, formatDbfs, dbfsToPercent } from "../lib/format";
 import {
   type CaptureSource,
   type MeetingType,
@@ -48,18 +49,6 @@ export const RecordContent: React.FC = () => {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const formatTimer = (seconds: number) => {
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    if (hrs > 0) {
-      return `${hrs.toString().padStart(2, "0")}:${mins
-        .toString()
-        .padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-    }
-    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-  };
-
   const handleStart = async () => {
     setValidationError(null);
     const hasAudio =
@@ -72,7 +61,7 @@ export const RecordContent: React.FC = () => {
       setIsSubmitting(true);
       await start();
     } catch (err: unknown) {
-      setValidationError(err instanceof Error ? err.message : "Failed to initiate capture engine.");
+      setValidationError(err instanceof Error && err.message ? err.message : "Failed to initiate capture engine.");
     } finally {
       setIsSubmitting(false);
     }
@@ -144,9 +133,9 @@ export const RecordContent: React.FC = () => {
             <div
               className="text-6xl sm:text-7xl font-mono font-light tracking-tight text-ink tabular-nums"
               aria-live="polite"
-              aria-label={`Elapsed recording time: ${formatTimer(elapsed_seconds)}`}
+              aria-label={`Elapsed recording time: ${formatElapsed(elapsed_seconds)}`}
             >
-              {formatTimer(elapsed_seconds)}
+              {formatElapsed(elapsed_seconds)}
             </div>
 
             <div className="text-sm font-semibold text-ink-muted truncate max-w-md mx-auto">
@@ -160,14 +149,14 @@ export const RecordContent: React.FC = () => {
                   <Volume2 className="w-3.5 h-3.5" /> System Audio
                 </span>
                 <span className="font-mono text-[11px] tabular-nums">
-                  {selected_sources.includes("system_audio") ? `${system_audio_level} dBFS` : "Disabled"}
+                  {selected_sources.includes("system_audio") ? formatDbfs(system_audio_level) : "Disabled"}
                 </span>
               </div>
               <div className="w-full h-2 bg-border rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-mint transition-all duration-fast"
+                  className={`h-full transition-all duration-fast ${system_audio_level > -3 ? "bg-status-warning" : "bg-mint"}`}
                   style={{
-                    width: selected_sources.includes("system_audio") && isRecording ? "75%" : "0%",
+                    width: `${selected_sources.includes("system_audio") && isRecording ? dbfsToPercent(system_audio_level) : 0}%`,
                   }}
                 />
               </div>
@@ -177,14 +166,14 @@ export const RecordContent: React.FC = () => {
                   <Mic className="w-3.5 h-3.5" /> Microphone
                 </span>
                 <span className="font-mono text-[11px] tabular-nums">
-                  {selected_sources.includes("microphone") ? `${mic_level} dBFS` : "Disabled"}
+                  {selected_sources.includes("microphone") ? formatDbfs(mic_level) : "Disabled"}
                 </span>
               </div>
               <div className="w-full h-2 bg-border rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-mint transition-all duration-fast"
+                  className={`h-full transition-all duration-fast ${mic_level > -3 ? "bg-status-warning" : "bg-mint"}`}
                   style={{
-                    width: selected_sources.includes("microphone") && isRecording ? "40%" : "0%",
+                    width: `${selected_sources.includes("microphone") && isRecording ? dbfsToPercent(mic_level) : 0}%`,
                   }}
                 />
               </div>

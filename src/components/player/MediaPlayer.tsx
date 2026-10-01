@@ -50,9 +50,25 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
 
   // Synchronize converted src
   const mediaSrc = src ? safeConvertFileSrc(src) : undefined;
+
+  // Reset any previous load error when the source changes
+  useEffect(() => {
+    setMediaError(null);
+  }, [mediaSrc]);
+
+  const handleMediaError = (e: React.SyntheticEvent<HTMLMediaElement>) => {
+    const code = e.currentTarget.error?.code;
+    setIsPlaying(false);
+    setMediaError(
+      code === 4
+        ? "This recording's format or location can't be played by the app."
+        : "Playback failed while loading the recording."
+    );
+  };
   const activeMedia = hasVideo ? videoRef.current : audioRef.current;
 
   const formatTime = (secs: number) => {
@@ -67,8 +83,10 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
     const el = hasVideo ? videoRef.current : audioRef.current;
     if (el) {
       if (el.paused) {
-        el.play().catch(() => {});
-        setIsPlaying(true);
+        el.play().then(
+          () => setIsPlaying(true),
+          () => setIsPlaying(false)
+        );
       } else {
         el.pause();
         setIsPlaying(false);
@@ -211,6 +229,9 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
               onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
               onDurationChange={(e) => onDurationChange?.(e.currentTarget.duration)}
               onEnded={() => setIsPlaying(false)}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onError={handleMediaError}
               onClick={togglePlay}
             />
           ) : (
@@ -282,7 +303,16 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
             onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
             onDurationChange={(e) => onDurationChange?.(e.currentTarget.duration)}
             onEnded={() => setIsPlaying(false)}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onError={handleMediaError}
           />
+        </div>
+      )}
+
+      {mediaError && (
+        <div role="alert" className="px-3 py-2 text-xs bg-red-950/60 text-red-200 border-t border-red-500/30">
+          {mediaError}
         </div>
       )}
 

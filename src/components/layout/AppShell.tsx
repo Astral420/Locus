@@ -6,11 +6,11 @@ import { RecoveryModal } from "../ui/RecoveryModal";
 import { useRecordingStore } from "../../stores/recordingStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useWindowResync } from "../../lib/useWindowResync";
-import { showRecordingWindow } from "../../lib/tauri";
+import { showRecordingWindow, isTauriEnvironment } from "../../lib/tauri";
 
 export const AppShell: React.FC = () => {
   const navigate = useNavigate();
-  const { recoverable, state: recordingState, tick } = useRecordingStore();
+  const { recoverable, state: recordingState, tick, syncFromBackend } = useRecordingStore();
   const { activeRecoveryModal, setActiveRecoveryModal } = useUiStore();
   const [backgroundNotice, setBackgroundNotice] = useState(false);
 
@@ -25,18 +25,22 @@ export const AppShell: React.FC = () => {
     return () => unlisten?.();
   }, []);
 
-  // Recording elapsed timer interval
+  // Live recording HUD: in the desktop app the Rust capture engine is the single
+  // source of truth for elapsed time and dBFS levels, so poll it. Outside Tauri
+  // (browser/mock mode) fall back to a local 1s tick.
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    if (recordingState === "recording") {
-      interval = setInterval(() => {
-        tick();
-      }, 1000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [recordingState, tick]);
+    const live = isTauriEnvironment();
+    const active = recordingState === "recording" || (live && recordingState === "paused");
+    if (!active) return;
+    const interval = setInterval(
+      () => {
+        if (live) void syncFromBackend();
+        else tick();
+      },
+      live ? 200 : 1000
+    );
+    return () => clearInterval(interval);
+  }, [recordingState, tick, syncFromBackend]);
 
   // Prompt recovery modal on launch if an interrupted session is detected
   useEffect(() => {

@@ -16,6 +16,7 @@ import { PipelineStatusBadge } from "../components/pipeline/PipelineStatusBadge"
 import { ExportModal } from "../components/export/ExportModal";
 import {
   getMeeting,
+  getMeetingMedia,
   getPipelineStatus,
   listTranscriptSegments,
   getSlides,
@@ -26,6 +27,7 @@ import {
   sendKnowledgeMessage,
   exportMeetingAsMarkdown,
   type MeetingDTO,
+  type MeetingMediaDTO,
   type TranscriptSegmentDTO,
   type SlideDTO,
   type SummaryRevisionDTO,
@@ -58,7 +60,7 @@ export const MeetingDetailContent: React.FC = () => {
   const [activeTab, setActiveTab] = useState<"summary" | "transcript" | "actions" | "slides" | "chat">("summary");
 
   // Synchronized Media Clock
-  const [currentTime, setCurrentTime] = useState(872); // 14:32 default
+  const [currentTime, setCurrentTime] = useState(0);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [showCopyToast, setShowCopyToast] = useState(false);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
@@ -67,6 +69,11 @@ export const MeetingDetailContent: React.FC = () => {
   const { data: meeting, isLoading: isMeetingLoading, isError: isMeetingError } = useQuery<MeetingDTO | null>({
     queryKey: ["meeting", meetingId],
     queryFn: () => getMeeting(meetingId),
+  });
+
+  const { data: media } = useQuery<MeetingMediaDTO | null>({
+    queryKey: ["meeting-media", meetingId],
+    queryFn: () => getMeetingMedia(meetingId),
   });
 
   const { data: pipelineStatus = [] } = useQuery<PipelineStatusDTO[]>({
@@ -204,7 +211,7 @@ export const MeetingDetailContent: React.FC = () => {
   }
 
   // Audio-only check: if meeting requested/detected type has no screen source
-  const hasVideo = meeting.id !== "m-02"; // m-02 is audio-only lecture fixture
+  const hasVideo = media ? media.has_video : meeting.id !== "m-02"; // fixture fallback: m-02 is audio-only
   const pendingActionsCount = actionItems.filter((a) => !a.completed).length;
 
   return (
@@ -290,6 +297,7 @@ export const MeetingDetailContent: React.FC = () => {
         <div className="lg:col-span-6 xl:col-span-5 p-5 border-r border-border/80 flex flex-col gap-4 overflow-y-auto bg-surface/10">
           {/* Synchronized Media Player (Task M8.01) */}
           <MediaPlayer
+            src={media?.path ?? undefined}
             hasVideo={hasVideo}
             meetingTitle={meeting.title}
             durationSeconds={meeting.duration_seconds}

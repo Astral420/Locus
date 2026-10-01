@@ -20,8 +20,8 @@ interface RecordingStoreState {
   elapsed_seconds: number;
   selected_sources: CaptureSource[];
   only_me_mic: boolean;
-  system_audio_level: number; // dBFS: e.g. -12
-  mic_level: number;          // dBFS: e.g. -48
+  system_audio_level: number; // dBFS, -90 = silence
+  mic_level: number;          // dBFS, -90 = silence
   recoverable: boolean;
   warning: boolean;
   reason: string | null;
@@ -50,8 +50,8 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
   // PRD FR1.5 defaults: System Audio (ON) + Screen (ON) + Microphone (OFF)
   selected_sources: ["system_audio", "screen"],
   only_me_mic: false,
-  system_audio_level: -12,
-  mic_level: -60,
+  system_audio_level: -90,
+  mic_level: -90,
   recoverable: false,
   warning: false,
   reason: null,
@@ -71,7 +71,7 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
   tick: () => {
     const { state, elapsed_seconds } = get();
     if (state === "recording") {
-      const nextSeconds = elapsed_seconds + 1;
+      const nextSeconds = Math.floor(elapsed_seconds) + 1;
       // 3-hour warning threshold (10800 seconds) per PRD FR12.5
       const showWarning = nextSeconds >= 10800;
       set({ elapsed_seconds: nextSeconds, warning: showWarning });
@@ -97,8 +97,8 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
       recoverable: res.recoverable,
       warning: res.warning,
       reason: res.reason,
-      system_audio_level: res.system_audio_level ?? get().system_audio_level,
-      mic_level: res.mic_level ?? get().mic_level,
+      system_audio_level: res.system_audio_level ?? -90,
+      mic_level: res.mic_level ?? -90,
     });
   },
 
@@ -116,8 +116,8 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
     const res = await stopRecording();
     set({
       state: res.state,
-      system_audio_level: res.system_audio_level ?? get().system_audio_level,
-      mic_level: res.mic_level ?? get().mic_level,
+      system_audio_level: res.system_audio_level ?? -90,
+      mic_level: res.mic_level ?? -90,
       capture_id: null,
       meeting_id: null,
       elapsed_seconds: 0,
@@ -137,8 +137,8 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
         recoverable: res.recoverable,
         warning: res.warning,
         reason: res.reason,
-        system_audio_level: res.system_audio_level ?? get().system_audio_level,
-        mic_level: res.mic_level ?? get().mic_level,
+        system_audio_level: res.system_audio_level ?? -90,
+        mic_level: res.mic_level ?? -90,
       });
     } catch (err) {
       console.warn("Failed to sync recording state from backend:", err);

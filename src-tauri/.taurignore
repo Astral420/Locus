@@ -2,3 +2,5 @@
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite-journal
+media/
+.locus-write-test

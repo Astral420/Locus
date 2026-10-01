@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod encoder;
 pub mod linux;
 pub mod macos;
@@ -71,7 +72,6 @@ impl CaptureOptions {
     }
 }
 
-#[derive(Debug)]
 struct Session {
     capture_id: String,
     meeting_id: String,
@@ -80,6 +80,8 @@ struct Session {
     sources: Vec<CaptureSource>,
     timeline: timeline::MediaTimeline,
     reason: Option<String>,
+    audio: Option<audio::AudioCapture>,
+    finished: Option<audio::FinishedAudio>,
 }
 
 #[derive(Clone)]
@@ -87,6 +89,8 @@ pub struct CaptureManager {
     active: Arc<Mutex<Option<Session>>>,
     #[allow(dead_code)]
     db: Option<Database>,
+    /// When false (unit tests) no hardware is opened and levels read as silence.
+    audio_enabled: bool,
 }
 
 impl CaptureManager {
@@ -94,6 +98,15 @@ impl CaptureManager {
         Self {
             active: Arc::new(Mutex::new(None)),
             db,
+            audio_enabled: false,
+        }
+    }
+
+    /// Production constructor: opens real audio devices while recording.
+    pub fn with_audio(db: Option<Database>) -> Self {
+        Self {
+            audio_enabled: true,
+            ..Self::new(db)
         }
     }
 
@@ -113,8 +126,14 @@ impl CaptureManager {
             sources: selected_sources,
             timeline: timeline::MediaTimeline::start(),
             reason: None,
+            audio: None,
+            finished: None,
         };
         let mut session = session;
+        if self.audio_enabled {
+            let media_dir = options.output_root.join(&session.meeting_id);
+            session.audio = Some(audio::AudioCapture::start(&media_dir, &options.sources)?);
+        }
         if let Some(database) = &self.db {
             let meeting_id = session.meeting_id.clone();
             let title = if options.title.trim().is_empty() {
@@ -203,9 +222,27 @@ impl CaptureManager {
         }
         if target == CaptureLifecycle::Paused {
             session.timeline.pause();
+            if let Some(audio) = &session.audio {
+                audio.set_paused(true);
+            }
         }
         if target == CaptureLifecycle::Recording {
             session.timeline.resume();
+            if let Some(audio) = &session.audio {
+                audio.set_paused(false);
+            }
+        }
+        if target == CaptureLifecycle::Finalizing {
+            if let Some(audio) = session.audio.take() {
+                match audio.finish() {
+                    Ok(finished) => session.finished = Some(finished),
+                    Err(error) => {
+                        session.reason = Some(error.to_string());
+                        session.state = CaptureLifecycle::Recoverable;
+                        return Err(error);
+                    }
+                }
+            }
         }
         if matches!(
             target,
@@ -236,6 +273,32 @@ impl CaptureManager {
             });
         }
         if matches!(session.state, CaptureLifecycle::Saved) {
+            if let (Some(database), Some(finished)) = (&self.db, session.finished.clone()) {
+                let meeting_id = session.meeting_id.clone();
+                let relative_path = format!("{meeting_id}/{}", audio::MIXED_FILE_NAME);
+                let duration = finished.duration_seconds;
+                let _ = database.run(move |connection| {
+                    connection
+                        .execute(
+                            "INSERT OR REPLACE INTO media_segments(id, manifest_id, stream_id, source, ordinal, relative_path, start_seconds, duration_seconds, committed_at) VALUES (?1, ?2, 'mixed', 'mixed', 0, ?3, 0, ?4, ?5)",
+                            (
+                                format!("segment:{meeting_id}:0"),
+                                format!("manifest:{meeting_id}"),
+                                &relative_path,
+                                duration,
+                                Utc::now().to_rfc3339(),
+                            ),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    connection
+                        .execute(
+                            "UPDATE capture_manifests SET state='saved' WHERE id=?1",
+                            [format!("manifest:{meeting_id}")],
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                });
+            }
             *active = None;
         }
         Ok(state)
@@ -274,6 +337,20 @@ impl CaptureManager {
     }
 }
 
+/// Real dBFS reading for a selected source; silence when no audio is flowing.
+fn live_level(session: &Session, source: &CaptureSource) -> Option<f32> {
+    if !session.sources.contains(source) {
+        return None;
+    }
+    Some(
+        session
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.level(source))
+            .unwrap_or(audio::SILENCE_DBFS),
+    )
+}
+
 fn to_dto(session: &Session) -> RecordingStateDto {
     let elapsed = session.timeline.elapsed().as_secs_f64();
     RecordingStateDto {
@@ -289,16 +366,8 @@ fn to_dto(session: &Session) -> RecordingStateDto {
         ),
         reason: session.reason.clone(),
         warning: session.timeline.warning_due(),
-        system_audio_level: if session.sources.contains(&CaptureSource::SystemAudio) {
-            Some(-12.0)
-        } else {
-            None
-        },
-        mic_level: if session.sources.contains(&CaptureSource::Microphone) {
-            Some(-48.0)
-        } else {
-            None
-        },
+        system_audio_level: live_level(session, &CaptureSource::SystemAudio),
+        mic_level: live_level(session, &CaptureSource::Microphone),
     }
 }
 

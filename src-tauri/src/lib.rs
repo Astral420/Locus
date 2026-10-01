@@ -50,7 +50,7 @@ pub fn run() {
     let _ = storage.recover_incomplete();
     let pipeline = PipelineOrchestrator::new(database.clone());
     let state = AppState {
-        capture: CaptureManager::new(Some(database.clone())),
+        capture: CaptureManager::with_audio(Some(database.clone())),
         media_root: PathBuf::from("media"),
         database: database.clone(),
         transcription: transcription::TranscriptionService::new(database.clone()),
@@ -110,6 +110,7 @@ pub fn run() {
             commands::meetings::get_meeting,
             commands::meetings::delete_meeting,
             commands::meetings::get_pipeline_status,
+            commands::meetings::get_meeting_media,
             commands::meetings::retry_pipeline_step,
             commands::meetings::get_slides,
             commands::models::list_models,

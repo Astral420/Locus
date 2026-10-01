@@ -38,6 +38,13 @@ export interface MeetingDTO {
   speaker_count?: number;
 }
 
+export interface MeetingMediaDTO {
+  /** Absolute path of the playable recording, or null when none was captured. */
+  path: string | null;
+  has_video: boolean;
+  duration_seconds: number;
+}
+
 export interface RecordingStateDTO {
   capture_id: string | null;
   meeting_id: string | null;
@@ -344,8 +351,25 @@ export interface EmbeddingModelDTO {
 }
 
 // Helpers for mock fallbacks when running outside Tauri or in testing
-function isTauriEnvironment(): boolean {
+export function isTauriEnvironment(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/**
+ * Recording commands must never silently fall back to mock data inside the real
+ * app: a failed start would otherwise look like a live recording that captures
+ * nothing. Backend errors arrive as plain strings, so normalise them to Error.
+ */
+async function invokeStrict<T>(cmd: string, args: Record<string, unknown> | undefined, fallback: () => T): Promise<T> {
+  if (!isTauriEnvironment()) {
+    return fallback();
+  }
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (err) {
+    if (err instanceof Error) throw err;
+    throw new Error(typeof err === "string" ? err : JSON.stringify(err));
+  }
 }
 
 async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>, fallback?: () => T): Promise<T> {
@@ -709,7 +733,7 @@ export function startRecording(
   title = "",
   singlePersonMic = false,
 ): Promise<RecordingStateDTO> {
-  return safeInvoke("start_recording", { sources, meetingType, title, singlePersonMic }, () => ({
+  return invokeStrict("start_recording", { sources, meetingType, title, singlePersonMic }, () => ({
     capture_id: "cap-live-01",
     meeting_id: "m-live-01",
     state: "recording",
@@ -725,7 +749,7 @@ export function startRecording(
 }
 
 export function pauseRecording(): Promise<RecordingStateDTO> {
-  return safeInvoke("pause_recording", undefined, () => ({
+  return invokeStrict("pause_recording", undefined, () => ({
     capture_id: "cap-live-01",
     meeting_id: "m-live-01",
     state: "paused",
@@ -741,7 +765,7 @@ export function pauseRecording(): Promise<RecordingStateDTO> {
 }
 
 export function resumeRecording(): Promise<RecordingStateDTO> {
-  return safeInvoke("resume_recording", undefined, () => ({
+  return invokeStrict("resume_recording", undefined, () => ({
     capture_id: "cap-live-01",
     meeting_id: "m-live-01",
     state: "recording",
@@ -755,7 +779,7 @@ export function resumeRecording(): Promise<RecordingStateDTO> {
 }
 
 export function stopRecording(): Promise<RecordingStateDTO> {
-  return safeInvoke("stop_recording", undefined, () => ({
+  return invokeStrict("stop_recording", undefined, () => ({
     capture_id: null,
     meeting_id: null,
     state: "saved",
@@ -777,6 +801,10 @@ export function getMeeting(id: string): Promise<MeetingDTO | null> {
     const found = mockMeetingsStore.find((m) => m.id === id);
     return found || null;
   });
+}
+
+export function getMeetingMedia(meetingId: string): Promise<MeetingMediaDTO | null> {
+  return safeInvoke("get_meeting_media", { meetingId }, () => null);
 }
 
 export function deleteMeeting(id: string): Promise<void> {

@@ -11,13 +11,17 @@
   },
   "app": {
     "windows": [{ "title": "Locus", "width": 1200, "height": 760, "minWidth": 960, "minHeight": 640, "resizable": true }],
-    "security": { "csp": null }
+    "security": {
+      "csp": null,
+      "assetProtocol": { "enable": true, "scope": ["**/media/**"] }
+    }
   },
   "bundle": {
     "active": true,
     "targets": ["dmg", "appimage", "nsis"],
     "icon": ["icons/icon.png"],
     "category": "Productivity",
+    "macOS": { "entitlements": "Entitlements.plist", "minimumSystemVersion": "13.0" },
     "shortDescription": "Offline-first meeting library",
     "longDescription": "Record, transcribe, diarize, summarize, and search meetings locally.",
     "resources": ["../models", "../sidecar/dist"]
