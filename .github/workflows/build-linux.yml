@@ -17,11 +17,12 @@ jobs:
         with: { node-version: 22, cache: pnpm }
       - uses: dtolnay/rust-toolchain@stable
         with: { toolchain: stable, components: rustfmt, clippy }
-      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libpipewire-0.3-dev libspa-0.2-dev
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libpipewire-0.3-dev libspa-0.2-dev libasound2-dev ffmpeg
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm build
       - run: pnpm test
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+        env: { LOCUS_REQUIRE_FFMPEG: '1' }
       - run: pnpm tauri build --debug --bundles appimage

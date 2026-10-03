@@ -75,9 +75,25 @@ describe("M8.01: Video/Audio Player Component", () => {
 
     expect(screen.getByText("Audio-Only Session")).toBeDefined();
     expect(screen.getByText("Distributed Systems & Consensus Lecture")).toBeDefined();
-    expect(screen.getByText("AAC 48kHz Stereo")).toBeDefined();
+    // The badge must describe the real state, not a hardcoded codec (recordings are not always AAC).
+    expect(screen.getByText("No audio file")).toBeDefined();
     // Video element should not be rendered for audio-only
     expect(document.querySelector("video")).toBeNull();
+  });
+
+  it("loads the recorded file into an <audio> element for audio-only sessions", () => {
+    render(
+      <MediaPlayer
+        src="/tmp/media/m1/audio.wav"
+        hasVideo={false}
+        meetingTitle="Mic only"
+        durationSeconds={10}
+        currentTime={0}
+        onTimeUpdate={vi.fn()}
+      />
+    );
+    expect(document.querySelector("audio")?.getAttribute("src")).toContain("audio.wav");
+    expect(screen.getByText("Recorded audio")).toBeDefined();
   });
 
   it("supports playback speed selection (0.75x - 2.0x)", () => {

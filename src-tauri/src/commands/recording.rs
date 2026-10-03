@@ -11,62 +11,90 @@ pub fn show_recording_window(window: tauri::Window) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
+/// Capture commands run on the blocking pool: starting opens audio devices and
+/// FFmpeg (and can sit behind an OS permission prompt) and stopping mixes and
+/// muxes the recording. Doing that on the main thread froze the whole UI.
+async fn blocking<T: Send + 'static>(
+    job: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
-pub fn start_recording(
+pub async fn start_recording(
     state: State<'_, AppState>,
     sources: Vec<CaptureSource>,
     meeting_type: MeetingType,
     title: Option<String>,
     single_person_mic: Option<bool>,
 ) -> Result<RecordingStateDto, String> {
-    // Recordings are played back through the asset protocol, which needs absolute paths.
-    std::fs::create_dir_all(&state.media_root).map_err(|e| e.to_string())?;
-    let output_root = state.media_root.canonicalize().map_err(|e| e.to_string())?;
-    let options = CaptureOptions {
-        sources,
-        meeting_type,
-        single_person_mic: single_person_mic.unwrap_or(false),
-        title: title.unwrap_or_default(),
-        output_root,
-    };
-    preflight::validate_storage(&options).map_err(|e| e.to_string())?;
-    #[cfg(target_os = "linux")]
-    crate::capture::linux::preflight(&options).map_err(|e| e.to_string())?;
-    #[cfg(target_os = "macos")]
-    crate::capture::macos::preflight(&options).map_err(|e| e.to_string())?;
-    #[cfg(target_os = "windows")]
-    crate::capture::windows::preflight(&options).map_err(|e| e.to_string())?;
-    state.capture.start(options).map_err(|e| e.to_string())
+    let capture = state.capture.clone();
+    let media_root = state.media_root.clone();
+    blocking(move || {
+        // Recordings are played back through the asset protocol, which needs absolute paths.
+        std::fs::create_dir_all(&media_root).map_err(|e| e.to_string())?;
+        let output_root = media_root.canonicalize().map_err(|e| e.to_string())?;
+        let options = CaptureOptions {
+            sources,
+            meeting_type,
+            single_person_mic: single_person_mic.unwrap_or(false),
+            title: title.unwrap_or_default(),
+            output_root,
+        };
+        preflight::validate_storage(&options).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        crate::capture::linux::preflight(&options).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        crate::capture::macos::preflight(&options).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        crate::capture::windows::preflight(&options).map_err(|e| e.to_string())?;
+        capture.start(options).map_err(|e| e.to_string())
+    })
+    .await
 }
+
 #[tauri::command]
-pub fn pause_recording(state: State<'_, AppState>) -> Result<RecordingStateDto, String> {
-    state
-        .capture
-        .transition(CaptureLifecycle::Paused)
-        .map_err(|e| e.to_string())
+pub async fn pause_recording(state: State<'_, AppState>) -> Result<RecordingStateDto, String> {
+    let capture = state.capture.clone();
+    blocking(move || {
+        capture
+            .transition(CaptureLifecycle::Paused)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
+
 #[tauri::command]
-pub fn resume_recording(state: State<'_, AppState>) -> Result<RecordingStateDto, String> {
-    state
-        .capture
-        .transition(CaptureLifecycle::Recording)
-        .map_err(|e| e.to_string())
+pub async fn resume_recording(state: State<'_, AppState>) -> Result<RecordingStateDto, String> {
+    let capture = state.capture.clone();
+    blocking(move || {
+        capture
+            .transition(CaptureLifecycle::Recording)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
+
 #[tauri::command]
-pub fn stop_recording(state: State<'_, AppState>) -> Result<RecordingStateDto, String> {
-    state
-        .capture
-        .transition(CaptureLifecycle::Finalizing)
-        .map_err(|e| e.to_string())?;
-    let result = state
-        .capture
-        .transition(CaptureLifecycle::Saved)
-        .map_err(|e| e.to_string())?;
-    if let Some(meeting_id) = result.meeting_id.as_deref() {
-        state.pipeline.enqueue(
-            meeting_id,
-            crate::pipeline::orchestrator::PipelineMode::Balanced,
-        )?;
-    }
-    Ok(result)
+pub async fn stop_recording(state: State<'_, AppState>) -> Result<RecordingStateDto, String> {
+    let capture = state.capture.clone();
+    let pipeline = state.pipeline.clone();
+    blocking(move || {
+        capture
+            .transition(CaptureLifecycle::Finalizing)
+            .map_err(|e| e.to_string())?;
+        let result = capture
+            .transition(CaptureLifecycle::Saved)
+            .map_err(|e| e.to_string())?;
+        if let Some(meeting_id) = result.meeting_id.as_deref() {
+            pipeline.enqueue(
+                meeting_id,
+                crate::pipeline::orchestrator::PipelineMode::Balanced,
+            )?;
+        }
+        Ok(result)
+    })
+    .await
 }

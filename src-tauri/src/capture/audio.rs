@@ -52,7 +52,8 @@ impl Sink {
             self.level.store(SILENCE_DBFS.to_bits(), Ordering::Relaxed);
             return;
         }
-        self.level.store(rms_dbfs(samples).to_bits(), Ordering::Relaxed);
+        self.level
+            .store(rms_dbfs(samples).to_bits(), Ordering::Relaxed);
         if let Ok(mut guard) = self.writer.lock() {
             if let Some(writer) = guard.as_mut() {
                 for sample in samples {
@@ -165,8 +166,10 @@ fn build_stream(
         SampleFormat::U16 => device.build_input_stream(
             stream_config,
             move |data: &[u16], _| {
-                let converted: Vec<f32> =
-                    data.iter().map(|s| (*s as f32 - 32768.0) / 32768.0).collect();
+                let converted: Vec<f32> = data
+                    .iter()
+                    .map(|s| (*s as f32 - 32768.0) / 32768.0)
+                    .collect();
                 sink.push(&converted);
             },
             on_error,
@@ -200,7 +203,8 @@ impl AudioCapture {
     /// already opened) if any selected source cannot be captured, so the UI
     /// never shows "recording" for a source that captures nothing.
     pub fn start(dir: &Path, sources: &[CaptureSource]) -> Result<Self, CaptureError> {
-        fs::create_dir_all(dir).map_err(|e| unavailable(format!("cannot create media folder: {e}")))?;
+        fs::create_dir_all(dir)
+            .map_err(|e| unavailable(format!("cannot create media folder: {e}")))?;
         let paused = Arc::new(AtomicBool::new(false));
         let mut capture = AudioCapture {
             dir: dir.to_path_buf(),
@@ -208,7 +212,10 @@ impl AudioCapture {
             paused: Arc::clone(&paused),
         };
         for source in sources {
-            if !matches!(source, CaptureSource::SystemAudio | CaptureSource::Microphone) {
+            if !matches!(
+                source,
+                CaptureSource::SystemAudio | CaptureSource::Microphone
+            ) {
                 continue;
             }
             match Self::start_track(dir, source, Arc::clone(&paused)) {
@@ -311,6 +318,11 @@ impl AudioCapture {
             .iter()
             .find(|track| &track.source == source)
             .map(|track| f32::from_bits(track.level.load(Ordering::Relaxed)))
+    }
+
+    /// Stops and deletes everything recorded so far (failed start).
+    pub fn discard(mut self) {
+        self.abort();
     }
 
     fn abort(&mut self) {
@@ -485,9 +497,15 @@ mod tests {
         assert_eq!(rms_dbfs(&[]), SILENCE_DBFS);
         assert_eq!(rms_dbfs(&[0.0; 64]), SILENCE_DBFS);
         let full_scale = rms_dbfs(&[1.0; 64]);
-        assert!(full_scale.abs() < 0.01, "full scale is 0 dBFS, got {full_scale}");
+        assert!(
+            full_scale.abs() < 0.01,
+            "full scale is 0 dBFS, got {full_scale}"
+        );
         let half = rms_dbfs(&[0.5; 64]);
-        assert!((half + 6.02).abs() < 0.05, "0.5 amplitude is about -6 dBFS, got {half}");
+        assert!(
+            (half + 6.02).abs() < 0.05,
+            "0.5 amplitude is about -6 dBFS, got {half}"
+        );
         assert!(rms_dbfs(&[0.01; 64]) < half);
     }
 
@@ -502,7 +520,10 @@ mod tests {
         write_tone(&a, 48_000, 2, 1.0, 0.3);
         write_tone(&b, 16_000, 1, 0.5, 0.3);
         let duration = mix_tracks(&[a, b], &out).unwrap();
-        assert!((duration - 1.0).abs() < 0.01, "longest track sets duration: {duration}");
+        assert!(
+            (duration - 1.0).abs() < 0.01,
+            "longest track sets duration: {duration}"
+        );
         let reader = WavReader::open(&out).unwrap();
         assert_eq!(reader.spec().channels, 1);
         assert_eq!(reader.spec().sample_rate, 48_000);

@@ -17,10 +17,12 @@ jobs:
         with: { node-version: 22, cache: pnpm }
       - uses: dtolnay/rust-toolchain@stable
         with: { toolchain: stable, components: rustfmt, clippy }
+      - run: choco install ffmpeg --no-progress -y
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm build
       - run: pnpm test
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+        env: { LOCUS_REQUIRE_FFMPEG: '1' }
       - run: pnpm tauri build --debug --bundles nsis

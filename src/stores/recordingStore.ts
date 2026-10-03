@@ -40,6 +40,23 @@ interface RecordingStoreState {
   syncFromBackend: () => Promise<void>;
 }
 
+// While a start/pause/resume/stop command is in flight, backend polls would
+// return a pre-command snapshot and could flip the UI back (e.g. "recording"
+// after Stop). Polls are skipped while busy and discarded if a command ran
+// during them.
+let inFlightCommands = 0;
+let commandEpoch = 0;
+async function runCommand<T>(job: () => Promise<T>): Promise<T> {
+  inFlightCommands += 1;
+  commandEpoch += 1;
+  try {
+    return await job();
+  } finally {
+    inFlightCommands -= 1;
+    commandEpoch += 1;
+  }
+}
+
 export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
   state: "idle",
   capture_id: null,
@@ -87,7 +104,9 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
     if (!hasAudio) {
       throw new Error("At least one audio source (System Audio or Microphone) is required to start recording.");
     }
-    const res = await startRecording(selected_sources, meeting_type, get().meeting_title, get().only_me_mic);
+    const res = await runCommand(() =>
+      startRecording(selected_sources, meeting_type, get().meeting_title, get().only_me_mic)
+    );
     set({
       state: res.state,
       capture_id: res.capture_id,
@@ -103,19 +122,20 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
   },
 
   pause: async () => {
-    const res = await pauseRecording();
+    const res = await runCommand(pauseRecording);
     set({ state: res.state });
   },
 
   resume: async () => {
-    const res = await resumeRecording();
+    const res = await runCommand(resumeRecording);
     set({ state: res.state });
   },
 
   stop: async () => {
-    const res = await stopRecording();
+    const res = await runCommand(stopRecording);
     set({
       state: res.state,
+      reason: res.reason,
       system_audio_level: res.system_audio_level ?? -90,
       mic_level: res.mic_level ?? -90,
       capture_id: null,
@@ -126,8 +146,11 @@ export const useRecordingStore = create<RecordingStoreState>((set, get) => ({
   },
 
   syncFromBackend: async () => {
+    if (inFlightCommands > 0) return;
+    const epochAtRequest = commandEpoch;
     try {
       const res: RecordingStateDTO = await getRecordingState();
+      if (inFlightCommands > 0 || epochAtRequest !== commandEpoch) return;
       set({
         state: res.state,
         capture_id: res.capture_id,

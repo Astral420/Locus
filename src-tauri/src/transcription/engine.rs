@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::{path::Path, process::Command};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use thiserror::Error;
 use whisper_rs::{
     get_lang_str, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
@@ -85,6 +87,7 @@ pub fn parse_macos_amd_discrete(system_profiler_output: &str) -> bool {
         && (output.contains("vram") || output.contains("discrete") || output.contains("radeon pro"))
 }
 
+#[cfg(target_os = "macos")]
 fn system_profiler_displays() -> Option<String> {
     Command::new("system_profiler")
         .args(["SPDisplaysDataType", "-json"])

@@ -9,6 +9,7 @@ jobs:
         with: { version: 11.25.0 }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
+      - run: brew install ffmpeg
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm build
       - run: pnpm test
@@ -16,6 +17,7 @@ jobs:
         with: { toolchain: stable }
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+        env: { LOCUS_REQUIRE_FFMPEG: '1' }
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: python -m pytest sidecar/tests

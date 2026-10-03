@@ -69,7 +69,6 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
         : "Playback failed while loading the recording."
     );
   };
-  const activeMedia = hasVideo ? videoRef.current : audioRef.current;
 
   const formatTime = (secs: number) => {
     if (isNaN(secs) || secs < 0) secs = 0;
@@ -271,7 +270,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
 
             <div className="flex items-center gap-2 text-[11px] font-mono text-stone-400 bg-stone-900/80 px-2.5 py-1 rounded border border-border/40">
               <span className="inline-block w-2 h-2 rounded-full bg-mint animate-pulse" />
-              <span>AAC 48kHz Stereo</span>
+              <span>{mediaSrc ? "Recorded audio" : "No audio file"}</span>
             </div>
           </div>
 

@@ -3,6 +3,7 @@ import { Moon, Sun, Monitor, Circle, Search, PlusCircle } from "lucide-react";
 import { useUiStore, type ThemeMode } from "../../stores/uiStore";
 import { useRecordingStore } from "../../stores/recordingStore";
 import { useNavigate } from "@tanstack/react-router";
+import { formatElapsed } from "../../lib/format";
 
 export interface HeaderProps {
   title?: string;
@@ -14,12 +15,6 @@ export const Header: React.FC<HeaderProps> = ({ title, subtitle, actions }) => {
   const { theme, setTheme } = useUiStore();
   const { state: recordingState, elapsed_seconds } = useRecordingStore();
   const navigate = useNavigate();
-
-  const formatElapsed = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-  };
 
   const nextTheme: Record<ThemeMode, ThemeMode> = {
     system: "light",
@@ -48,7 +43,7 @@ export const Header: React.FC<HeaderProps> = ({ title, subtitle, actions }) => {
       </div>
 
       {/* Center Active Recording HUD Banner if recording is active outside of /record */}
-      {recordingState === "recording" && (
+      {(recordingState === "recording" || recordingState === "paused") && (
         <div
           onClick={() => void navigate({ to: "/record" })}
           role="button"
@@ -58,8 +53,10 @@ export const Header: React.FC<HeaderProps> = ({ title, subtitle, actions }) => {
           }}
           className="flex items-center gap-2 px-3 py-1 bg-red-500/10 border border-status-recording/30 rounded-full cursor-pointer hover:bg-red-500/20 text-xs font-mono font-medium text-status-recording focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-status-recording"
         >
-          <Circle className="w-2.5 h-2.5 fill-status-recording text-status-recording animate-ping" />
-          <span>REC</span>
+          <Circle
+            className={`w-2.5 h-2.5 fill-status-recording text-status-recording ${recordingState === "recording" ? "animate-ping" : ""}`}
+          />
+          <span>{recordingState === "recording" ? "REC" : "PAUSED"}</span>
           <span className="tabular-nums font-semibold">{formatElapsed(elapsed_seconds)}</span>
         </div>
       )}

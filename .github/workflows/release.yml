@@ -1,0 +1,87 @@
+# Signed release builds with the bundled FFmpeg. Run manually or push a v* tag.
+#
+# Per platform: fetch pinned FFmpeg -> verify it -> (macOS) sign it -> build the
+# installer -> verify the installer really contains a working FFmpeg.
+# Requires packaging/ffmpeg/manifest.txt to be filled in (run build-ffmpeg first).
+#
+# NOTE: written without access to the runners/secrets; the first run will need
+# tuning (runner labels, signing). The verify step is the safety net.
+name: release
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin,     os: macos-15,       platform: macos,   bundles: app }
+          - { target: x86_64-apple-darwin,      os: macos-15-intel, platform: macos,   bundles: app }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04,   platform: linux,   bundles: appimage }
+          - { target: x86_64-pc-windows-msvc,   os: windows-2022,   platform: windows, bundles: nsis }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run: { shell: bash }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.25.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libpipewire-0.3-dev libspa-0.2-dev libasound2-dev
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Fetch bundled FFmpeg (pinned + checksum-verified)
+        run: packaging/fetch-ffmpeg.sh ${{ matrix.target }}
+      - name: Verify FFmpeg before packaging
+        run: |
+          bin=src-tauri/ffmpeg/ffmpeg; [ "${{ matrix.platform }}" = "windows" ] && bin=src-tauri/ffmpeg/ffmpeg.exe
+          packaging/ffmpeg-smoke.sh "$bin"
+
+      # Hardened-runtime signing of the nested binary happens BEFORE the app is
+      # bundled so notarization covers it.
+      - name: Import Developer ID certificate and sign FFmpeg (macOS)
+        if: matrix.platform == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          kc="$RUNNER_TEMP/build.keychain-db"; pw="$(uuidgen)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
+          security set-key-partition-list -S apple-tool:,apple: -k "$pw" "$kc"
+          security list-keychains -d user -s "$kc" login.keychain
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/ffmpeg/ffmpeg
+
+      - name: Build installer
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Verify the installer contains a working, signed FFmpeg
+        run: packaging/verify-bundle.sh ${{ matrix.platform }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locus-${{ matrix.target }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/macos/*.app
+            src-tauri/target/**/release/bundle/appimage/*.AppImage
+            src-tauri/target/**/release/bundle/nsis/*-setup.exe
+            src-tauri/ffmpeg/BUILDINFO.txt

@@ -1,0 +1,7 @@
+# target                       url                                                                                               sha256
+# Filled in after running the "build-ffmpeg" workflow (it prints these lines in its job summary).
+# fetch-ffmpeg.sh refuses to run while a hash is still TODO.
+aarch64-apple-darwin           https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-aarch64-apple-darwin.tar.gz    TODO
+x86_64-apple-darwin            https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-apple-darwin.tar.gz     TODO
+x86_64-pc-windows-msvc         https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-pc-windows-msvc.tar.gz  TODO
+x86_64-unknown-linux-gnu       https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-unknown-linux-gnu.tar.gz TODO

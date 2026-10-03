@@ -47,7 +47,7 @@ pub fn preflight(_options: &CaptureOptions) -> Result<(), CaptureError> {
                     .into(),
             ));
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "linux"))]
     {

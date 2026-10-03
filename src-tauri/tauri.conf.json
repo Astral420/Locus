@@ -24,6 +24,6 @@
     "macOS": { "entitlements": "Entitlements.plist", "minimumSystemVersion": "13.0" },
     "shortDescription": "Offline-first meeting library",
     "longDescription": "Record, transcribe, diarize, summarize, and search meetings locally.",
-    "resources": ["../models", "../sidecar/dist"]
+    "resources": ["../models", "../sidecar/dist", "ffmpeg"]
   }
 }

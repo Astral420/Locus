@@ -48,6 +48,27 @@ export const RecordContent: React.FC = () => {
 
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
+
+  const messageOf = (err: unknown, fallback: string) =>
+    typeof err === "string" && err
+      ? err
+      : err instanceof Error && err.message
+      ? err.message
+      : fallback;
+
+  const runTransport = async (action: () => Promise<void>, fallback: string) => {
+    setActionError(null);
+    try {
+      setIsSubmitting(true);
+      await action();
+    } catch (err) {
+      setActionError(messageOf(err, fallback));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const handleStart = async () => {
     setValidationError(null);
@@ -61,19 +82,27 @@ export const RecordContent: React.FC = () => {
       setIsSubmitting(true);
       await start();
     } catch (err: unknown) {
-      setValidationError(err instanceof Error && err.message ? err.message : "Failed to initiate capture engine.");
+      setValidationError(messageOf(err, "Failed to initiate capture engine."));
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleStop = async () => {
+    setActionError(null);
     try {
       setIsSubmitting(true);
       await stop();
-      void navigate({ to: "/" });
+      // A warning (e.g. video could not be finalised, audio kept) must not be
+      // hidden by an instant redirect.
+      const { reason } = useRecordingStore.getState();
+      if (reason) {
+        setSavedNotice(reason);
+      } else {
+        void navigate({ to: "/" });
+      }
     } catch (err) {
-      console.error(err);
+      setActionError(messageOf(err, "Could not stop and save the recording."));
     } finally {
       setIsSubmitting(false);
     }
@@ -109,6 +138,30 @@ export const RecordContent: React.FC = () => {
             <Button variant="ghost" size="sm" onClick={dismissWarning}>
               Dismiss
             </Button>
+          </div>
+        )}
+
+        {savedNotice && (
+          <div
+            role="status"
+            className="mb-6 p-4 rounded-lg bg-amber-500/10 border border-status-warning/40 flex items-center justify-between gap-4 text-xs text-amber-900 dark:text-amber-200"
+          >
+            <span>
+              <strong>Recording saved with a warning.</strong> {savedNotice}
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => void navigate({ to: "/" })}>
+              View meetings
+            </Button>
+          </div>
+        )}
+
+        {actionError && (
+          <div
+            role="alert"
+            className="mb-6 p-3 rounded-md bg-red-500/10 border border-status-error/30 text-xs text-status-error flex items-center gap-2"
+          >
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{actionError}</span>
           </div>
         )}
 
@@ -185,7 +238,7 @@ export const RecordContent: React.FC = () => {
                 <Button
                   variant="secondary"
                   size="lg"
-                  onClick={() => void pause()}
+                  onClick={() => void runTransport(pause, "Could not pause the recording.")}
                   disabled={isSubmitting}
                 >
                   <Pause className="w-4 h-4 mr-2" />
@@ -195,7 +248,7 @@ export const RecordContent: React.FC = () => {
                 <Button
                   variant="primary"
                   size="lg"
-                  onClick={() => void resume()}
+                  onClick={() => void runTransport(resume, "Could not resume the recording.")}
                   disabled={isSubmitting}
                 >
                   <Play className="w-4 h-4 mr-2 fill-current" />

@@ -1,0 +1,129 @@
+# One-off / on-demand: compiles the minimal static FFmpeg that Locus bundles and
+# publishes it to a GitHub Release. Run this when bumping FFmpeg/x264, then paste
+# the manifest lines from the job summary into packaging/ffmpeg/manifest.txt.
+#
+# NOTE: written without access to the runners; the first run will likely need
+# small fixes. Every leg ends with packaging/ffmpeg-smoke.sh, which fails the job
+# if the result is not complete and self-contained.
+name: build-ffmpeg
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version: { description: "FFmpeg release tag", default: "7.1.1" }
+      x264_ref:       { description: "x264 commit/tag (pin a commit)", default: "stable" }
+      revision:       { description: "Locus build revision suffix", default: "1" }
+
+env:
+  FFMPEG_VERSION: ${{ inputs.ffmpeg_version }}
+  X264_REF: ${{ inputs.x264_ref }}
+  RELEASE_TAG: ffmpeg-${{ inputs.ffmpeg_version }}-${{ inputs.revision }}
+
+# Only what Locus uses: screen input, libx264, aac, mp4/concat, scale/format.
+# GPL because of libx264 (see src-tauri/ffmpeg/README.md for the license gate).
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin,   os: macos-15,       shell: bash }
+          - { target: x86_64-apple-darwin,    os: macos-15-intel, shell: bash }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, shell: bash }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022,   shell: "msys2 {0}" }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run: { shell: "${{ matrix.shell }}" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm pkg-config
+
+      - name: Toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y nasm pkg-config build-essential
+
+      - name: Toolchain (Windows / MSYS2 MinGW)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make diffutils git nasm tar
+            mingw-w64-x86_64-toolchain mingw-w64-x86_64-pkgconf
+
+      - name: Build x264 (static)
+        run: |
+          PREFIX="$PWD/_deps"; mkdir -p "$PREFIX"
+          git clone https://code.videolan.org/videolan/x264.git
+          (cd x264 && git checkout "$X264_REF" && git rev-parse HEAD > "$PREFIX/x264.commit" \
+            && ./configure --prefix="$PREFIX" --enable-static --disable-cli --enable-pic \
+            && make -j4 && make install)
+
+      - name: Build FFmpeg (minimal, static)
+        run: |
+          PREFIX="$PWD/_deps"
+          curl -fsSL -o ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+          tar xf ffmpeg.tar.xz && cd "ffmpeg-${FFMPEG_VERSION}"
+          EXTRA=""
+          case "${{ runner.os }}" in
+            macOS)   EXTRA="--enable-avfoundation --enable-indev=avfoundation" ;;
+            Windows) EXTRA="--enable-indev=gdigrab" ;;
+            Linux)   EXTRA="--extra-ldflags=-static-libgcc" ;;
+          esac
+          PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
+            --prefix="$PWD/../_out" --pkg-config-flags=--static \
+            --extra-cflags="-I$PREFIX/include" --extra-ldflags="-L$PREFIX/lib" \
+            --disable-autodetect --disable-debug --disable-doc --disable-network \
+            --disable-ffplay --disable-ffprobe --disable-shared --enable-static \
+            --enable-gpl --enable-libx264 \
+            --disable-everything \
+            --enable-encoder=libx264,aac,pcm_s16le \
+            --enable-decoder=h264,aac,pcm_s16le,rawvideo,pcm_f32le \
+            --enable-muxer=mp4,null,wav,segment --enable-demuxer=concat,mov,wav,lavfi \
+            --enable-protocol=file,pipe \
+            --enable-filter=scale,format,aresample,anull,null,testsrc,sine,nullsrc \
+            --enable-indev=lavfi --enable-parser=h264,aac \
+            --enable-bsf=aac_adtstoasc,h264_mp4toannexb \
+            $EXTRA
+          make -j4 && make install
+          { echo "FFmpeg ${FFMPEG_VERSION}"; echo "x264 $(cat ../_deps/x264.commit)"; echo; \
+            "../_out/bin/ffmpeg" -hide_banner -buildconf; } > ../BUILDINFO.txt
+
+      - name: Smoke test (must be complete and self-contained)
+        run: |
+          bin=_out/bin/ffmpeg; [ "${{ runner.os }}" = "Windows" ] && bin=_out/bin/ffmpeg.exe
+          packaging/ffmpeg-smoke.sh "$bin"
+
+      - name: Package
+        run: |
+          bin=ffmpeg; [ "${{ runner.os }}" = "Windows" ] && bin=ffmpeg.exe
+          mkdir -p pkg && cp "_out/bin/$bin" pkg/ && cp BUILDINFO.txt pkg/
+          tar -czf "ffmpeg-${{ matrix.target }}.tar.gz" -C pkg .
+          if command -v sha256sum >/dev/null; then sum=$(sha256sum "ffmpeg-${{ matrix.target }}.tar.gz" | cut -d' ' -f1); \
+            else sum=$(shasum -a 256 "ffmpeg-${{ matrix.target }}.tar.gz" | cut -d' ' -f1); fi
+          echo "${{ matrix.target }} https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/ffmpeg-${{ matrix.target }}.tar.gz $sum" > "manifest-${{ matrix.target }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: |
+            ffmpeg-${{ matrix.target }}.tar.gz
+            manifest-${{ matrix.target }}.txt
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Publish release and print manifest lines
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release create "$RELEASE_TAG" out/*.tar.gz --repo "${{ github.repository }}" \
+            --title "Bundled FFmpeg $RELEASE_TAG" \
+            --notes "Static FFmpeg for Locus. GPL (libx264). Build recipe: .github/workflows/build-ffmpeg.yml; exact configure line in BUILDINFO.txt inside each archive."
+          { echo "### Paste into packaging/ffmpeg/manifest.txt"; echo '```'; cat out/manifest-*.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

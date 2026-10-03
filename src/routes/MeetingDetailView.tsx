@@ -17,6 +17,7 @@ import { ExportModal } from "../components/export/ExportModal";
 import {
   getMeeting,
   getMeetingMedia,
+  isTauriEnvironment,
   getPipelineStatus,
   listTranscriptSegments,
   getSlides,
@@ -211,7 +212,9 @@ export const MeetingDetailContent: React.FC = () => {
   }
 
   // Audio-only check: if meeting requested/detected type has no screen source
-  const hasVideo = media ? media.has_video : meeting.id !== "m-02"; // fixture fallback: m-02 is audio-only
+  // In the desktop app the backend is authoritative; the fixture fallback
+  // (m-02 is audio-only) only applies to browser/mock mode.
+  const hasVideo = media ? media.has_video : isTauriEnvironment() ? false : meeting.id !== "m-02";
   const pendingActionsCount = actionItems.filter((a) => !a.completed).length;
 
   return (

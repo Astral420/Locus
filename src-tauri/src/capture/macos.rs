@@ -7,7 +7,10 @@ pub const MIN_LOOPBACK_VERSION: (u32, u32) = (14, 6);
 
 /// Pure version check so it can be unit-tested on any platform.
 pub fn version_supports_loopback(version: &str) -> bool {
-    let mut parts = version.trim().split('.').map(|part| part.parse::<u32>().ok());
+    let mut parts = version
+        .trim()
+        .split('.')
+        .map(|part| part.parse::<u32>().ok());
     let major = parts.next().flatten();
     let minor = parts.next().flatten().unwrap_or(0);
     match major {

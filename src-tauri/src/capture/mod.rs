@@ -3,6 +3,7 @@ pub mod encoder;
 pub mod linux;
 pub mod macos;
 pub mod preflight;
+pub mod screen;
 pub mod timeline;
 pub mod windows;
 
@@ -82,6 +83,9 @@ struct Session {
     reason: Option<String>,
     audio: Option<audio::AudioCapture>,
     finished: Option<audio::FinishedAudio>,
+    screen: Option<screen::ScreenCapture>,
+    /// Set once the video+audio MP4 has been produced.
+    muxed_video: bool,
 }
 
 #[derive(Clone)]
@@ -128,11 +132,28 @@ impl CaptureManager {
             reason: None,
             audio: None,
             finished: None,
+            screen: None,
+            muxed_video: false,
         };
         let mut session = session;
         if self.audio_enabled {
             let media_dir = options.output_root.join(&session.meeting_id);
+            let epoch = std::time::Instant::now();
             session.audio = Some(audio::AudioCapture::start(&media_dir, &options.sources)?);
+            // Screen is a selected source: if it cannot be captured, fail the
+            // whole start instead of showing "recording" with no video.
+            if options.sources.contains(&CaptureSource::Screen) {
+                match screen::ScreenCapture::start(&media_dir, epoch) {
+                    Ok(capture) => session.screen = Some(capture),
+                    Err(error) => {
+                        if let Some(audio) = session.audio.take() {
+                            audio.discard();
+                        }
+                        let _ = std::fs::remove_dir_all(&media_dir);
+                        return Err(error);
+                    }
+                }
+            }
         }
         if let Some(database) = &self.db {
             let meeting_id = session.meeting_id.clone();
@@ -147,7 +168,7 @@ impl CaptureManager {
                 MeetingType::Auto => "auto",
             };
             let sources = serde_json::to_string(&session.sources).unwrap_or_else(|_| "[]".into());
-            database
+            let inserted = database
                 .run(move |connection| {
                     connection
                         .execute(
@@ -176,7 +197,16 @@ impl CaptureManager {
                         .map(|_| ())
                         .map_err(|error| error.to_string())
                 })
-                .map_err(|error| CaptureError::SourceUnavailable(error.to_string()))?;
+                .map_err(|error| CaptureError::SourceUnavailable(error.to_string()));
+            if let Err(error) = inserted {
+                if let Some(screen) = session.screen.take() {
+                    screen.abort();
+                }
+                if let Some(audio) = session.audio.take() {
+                    audio.discard();
+                }
+                return Err(error);
+            }
         }
         session.state = CaptureLifecycle::Recording;
         let state = to_dto(&session);
@@ -225,21 +255,57 @@ impl CaptureManager {
             if let Some(audio) = &session.audio {
                 audio.set_paused(true);
             }
+            if let Some(screen) = session.screen.as_mut() {
+                screen.pause();
+            }
         }
         if target == CaptureLifecycle::Recording {
+            // Restart video first: if it cannot resume, stay paused and report.
+            if let Some(screen) = session.screen.as_mut() {
+                if let Err(error) = screen.resume() {
+                    session.reason = Some(error.to_string());
+                    return Err(error);
+                }
+            }
             session.timeline.resume();
             if let Some(audio) = &session.audio {
                 audio.set_paused(false);
             }
         }
         if target == CaptureLifecycle::Finalizing {
+            let screen = session.screen.take();
             if let Some(audio) = session.audio.take() {
                 match audio.finish() {
                     Ok(finished) => session.finished = Some(finished),
                     Err(error) => {
+                        if let Some(screen) = screen {
+                            screen.abort();
+                        }
                         session.reason = Some(error.to_string());
                         session.state = CaptureLifecycle::Recoverable;
                         return Err(error);
+                    }
+                }
+            }
+            if let Some(screen) = screen {
+                let video = screen.finish();
+                if let Some(finished) = &session.finished {
+                    let output = finished.mixed_path.with_file_name(screen::VIDEO_FILE_NAME);
+                    let result = match screen::locate_ffmpeg() {
+                        Some(ffmpeg) => {
+                            screen::mux_recording(&ffmpeg, &video, &finished.mixed_path, &output)
+                        }
+                        None => Err("FFmpeg disappeared before the recording was finalised".into()),
+                    };
+                    match result {
+                        Ok(()) => session.muxed_video = true,
+                        // Never lose the take: audio.wav stays playable and the
+                        // raw video segments stay on disk for recovery.
+                        Err(error) => {
+                            session.reason = Some(format!(
+                                "Video could not be finalised ({error}); audio was saved."
+                            ))
+                        }
                     }
                 }
             }
@@ -275,7 +341,12 @@ impl CaptureManager {
         if matches!(session.state, CaptureLifecycle::Saved) {
             if let (Some(database), Some(finished)) = (&self.db, session.finished.clone()) {
                 let meeting_id = session.meeting_id.clone();
-                let relative_path = format!("{meeting_id}/{}", audio::MIXED_FILE_NAME);
+                let file = if session.muxed_video {
+                    screen::VIDEO_FILE_NAME
+                } else {
+                    audio::MIXED_FILE_NAME
+                };
+                let relative_path = format!("{meeting_id}/{file}");
                 let duration = finished.duration_seconds;
                 let _ = database.run(move |connection| {
                     connection
