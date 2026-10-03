@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Header } from "../components/layout/Header";
 import { Button } from "../components/ui/Button";
@@ -9,6 +9,7 @@ import { formatElapsed, formatDbfs, dbfsToPercent } from "../lib/format";
 import {
   type CaptureSource,
   type MeetingType,
+  prewarmCapture,
 } from "../lib/tauri";
 import {
   Volume2,
@@ -25,6 +26,11 @@ import {
 
 export const RecordContent: React.FC = () => {
   const navigate = useNavigate();
+
+  // Pay the one-time FFmpeg/display lookup cost now, not when Record is pressed.
+  useEffect(() => {
+    void prewarmCapture();
+  }, []);
   const {
     state,
     elapsed_seconds,

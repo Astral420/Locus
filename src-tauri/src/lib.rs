@@ -86,6 +86,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::greet,
             commands::get_recording_state,
+            commands::recording::prewarm_capture,
             commands::recording::start_recording,
             commands::recording::pause_recording,
             commands::recording::resume_recording,

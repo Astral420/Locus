@@ -727,6 +727,11 @@ export function showRecordingWindow(): Promise<void> {
   return safeInvoke("show_recording_window", undefined, () => undefined);
 }
 
+/** Best-effort: pre-loads FFmpeg/display info so Record starts faster. Never throws. */
+export function prewarmCapture(): Promise<void> {
+  return invokeStrict<void>("prewarm_capture", undefined, () => undefined).catch(() => undefined);
+}
+
 export function startRecording(
   sources: CaptureSource[],
   meetingType: MeetingType = "auto",

@@ -84,6 +84,8 @@ struct Session {
     audio: Option<audio::AudioCapture>,
     finished: Option<audio::FinishedAudio>,
     screen: Option<screen::ScreenCapture>,
+    /// When the audio streams were really recording (t=0 of the audio file).
+    audio_started_at: Option<std::time::Instant>,
     /// Set once the video+audio MP4 has been produced.
     muxed_video: bool,
 }
@@ -133,27 +135,60 @@ impl CaptureManager {
             audio: None,
             finished: None,
             screen: None,
+            audio_started_at: None,
             muxed_video: false,
         };
         let mut session = session;
         if self.audio_enabled {
             let media_dir = options.output_root.join(&session.meeting_id);
-            let epoch = std::time::Instant::now();
-            session.audio = Some(audio::AudioCapture::start(&media_dir, &options.sources)?);
-            // Screen is a selected source: if it cannot be captured, fail the
-            // whole start instead of showing "recording" with no video.
-            if options.sources.contains(&CaptureSource::Screen) {
-                match screen::ScreenCapture::start(&media_dir, epoch) {
-                    Ok(capture) => session.screen = Some(capture),
-                    Err(error) => {
-                        if let Some(audio) = session.audio.take() {
-                            audio.discard();
-                        }
-                        let _ = std::fs::remove_dir_all(&media_dir);
-                        return Err(error);
+            std::fs::create_dir_all(&media_dir).map_err(|e| {
+                CaptureError::SourceUnavailable(format!("cannot create media folder: {e}"))
+            })?;
+            // Screen (FFmpeg, ~1s to the first frame) and the audio devices open
+            // at the same time instead of one after the other. Each reports the
+            // instant it really began, and the mux aligns the streams to that.
+            let screen_job = options.sources.contains(&CaptureSource::Screen).then(|| {
+                let dir = media_dir.clone();
+                std::thread::spawn(move || screen::ScreenCapture::start(&dir))
+            });
+            let audio_result = audio::AudioCapture::start(&media_dir, &options.sources);
+            let screen_result = screen_job.map(|job| {
+                job.join().unwrap_or_else(|_| {
+                    Err(CaptureError::SourceUnavailable(
+                        "Screen: capture thread crashed".into(),
+                    ))
+                })
+            });
+            // Screen is a selected source: if either side cannot be captured,
+            // fail the whole start instead of showing "recording" with gaps.
+            match (audio_result, screen_result) {
+                (Ok(audio), None) => {
+                    session.audio_started_at = audio.started_at();
+                    session.audio = Some(audio);
+                }
+                (Ok(audio), Some(Ok(screen))) => {
+                    session.audio_started_at = audio.started_at();
+                    session.audio = Some(audio);
+                    session.screen = Some(screen);
+                }
+                (audio, screen) => {
+                    let mut failure = None;
+                    match audio {
+                        Ok(audio) => audio.discard(),
+                        Err(error) => failure = Some(error),
                     }
+                    match screen {
+                        Some(Ok(screen)) => screen.abort(),
+                        Some(Err(error)) => failure = failure.or(Some(error)),
+                        None => {}
+                    }
+                    let _ = std::fs::remove_dir_all(&media_dir);
+                    return Err(failure.expect("a failed start carries an error"));
                 }
             }
+            // The on-screen timer starts when capture really has, not when the
+            // button was pressed (device start-up used to be counted in it).
+            session.timeline = timeline::MediaTimeline::start();
         }
         if let Some(database) = &self.db {
             let meeting_id = session.meeting_id.clone();
@@ -252,11 +287,16 @@ impl CaptureManager {
         }
         if target == CaptureLifecycle::Paused {
             session.timeline.pause();
+            // Stop video and audio at the same instant, then wait for the
+            // video file to flush; otherwise one runs on and A/V drifts.
+            if let Some(screen) = session.screen.as_mut() {
+                screen.request_stop();
+            }
             if let Some(audio) = &session.audio {
                 audio.set_paused(true);
             }
             if let Some(screen) = session.screen.as_mut() {
-                screen.pause();
+                screen.complete_stop();
             }
         }
         if target == CaptureLifecycle::Recording {
@@ -273,7 +313,11 @@ impl CaptureManager {
             }
         }
         if target == CaptureLifecycle::Finalizing {
-            let screen = session.screen.take();
+            let mut screen = session.screen.take();
+            // Video stops at the same moment the audio streams are closed.
+            if let Some(screen) = screen.as_mut() {
+                screen.request_stop();
+            }
             if let Some(audio) = session.audio.take() {
                 match audio.finish() {
                     Ok(finished) => session.finished = Some(finished),
@@ -291,12 +335,41 @@ impl CaptureManager {
                 let video = screen.finish();
                 if let Some(finished) = &session.finished {
                     let output = finished.mixed_path.with_file_name(screen::VIDEO_FILE_NAME);
+                    // Seconds the audio began after the first video frame
+                    // (negative: audio was already recording before frame 0).
+                    let offset = match session.audio_started_at {
+                        Some(audio_at) if audio_at >= video.video_started_at => audio_at
+                            .duration_since(video.video_started_at)
+                            .as_secs_f64(),
+                        Some(audio_at) => -video
+                            .video_started_at
+                            .duration_since(audio_at)
+                            .as_secs_f64(),
+                        None => 0.0,
+                    };
                     let result = match screen::locate_ffmpeg() {
-                        Some(ffmpeg) => {
-                            screen::mux_recording(&ffmpeg, &video, &finished.mixed_path, &output)
-                        }
+                        Some(ffmpeg) => screen::mux_recording(
+                            &ffmpeg,
+                            &video.segments,
+                            Some((finished.mixed_path.as_path(), offset)),
+                            &output,
+                        ),
                         None => Err("FFmpeg disappeared before the recording was finalised".into()),
                     };
+                    // Sync report next to the recording (cheap, and the first thing
+                    // to look at if A/V ever drifts).
+                    if let Some(ffmpeg) = screen::locate_ffmpeg() {
+                        let streams = if result.is_ok() {
+                            screen::describe_streams(&ffmpeg, &output)
+                        } else {
+                            String::new()
+                        };
+                        let report = format!(
+                            "audio_offset_secs={offset:.3}\nmux={}\n{streams}\n",
+                            if result.is_ok() { "ok" } else { "failed" }
+                        );
+                        let _ = std::fs::write(output.with_file_name("sync-report.txt"), report);
+                    }
                     match result {
                         Ok(()) => session.muxed_video = true,
                         // Never lose the take: audio.wav stays playable and the

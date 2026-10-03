@@ -22,6 +22,17 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
+/// Warms up screen capture (locates/loads FFmpeg, lists displays) while the
+/// Record page is open, so pressing Record does not pay that cost. Best-effort.
+#[tauri::command]
+pub async fn prewarm_capture() -> Result<(), String> {
+    blocking(|| {
+        crate::capture::screen::prewarm();
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn start_recording(
     state: State<'_, AppState>,

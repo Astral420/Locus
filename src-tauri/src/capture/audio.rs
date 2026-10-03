@@ -16,6 +16,7 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread::JoinHandle,
+    time::Instant,
 };
 
 /// Level reported for silence / no signal / paused.
@@ -73,12 +74,47 @@ struct Track {
     level: Arc<AtomicU32>,
     stop: mpsc::Sender<()>,
     handle: Option<JoinHandle<()>>,
+    /// When this stream actually began delivering samples.
+    started_at: Instant,
+}
+
+/// A track whose capture thread has been spawned but has not reported ready.
+struct PendingTrack {
+    source: CaptureSource,
+    path: PathBuf,
+    level: Arc<AtomicU32>,
+    stop: mpsc::Sender<()>,
+    handle: JoinHandle<()>,
+    ready: mpsc::Receiver<Result<Instant, String>>,
+}
+
+impl PendingTrack {
+    fn wait(self) -> Result<Track, String> {
+        match self.ready.recv() {
+            Ok(Ok(started_at)) => Ok(Track {
+                source: self.source,
+                path: self.path,
+                level: self.level,
+                stop: self.stop,
+                handle: Some(self.handle),
+                started_at,
+            }),
+            Ok(Err(message)) => {
+                let _ = self.handle.join();
+                let _ = fs::remove_file(&self.path);
+                Err(message)
+            }
+            Err(_) => Err("capture thread exited unexpectedly".into()),
+        }
+    }
 }
 
 pub struct AudioCapture {
     dir: PathBuf,
     tracks: Vec<Track>,
     paused: Arc<AtomicBool>,
+    /// Earliest moment any track was recording; t=0 of the mixed file.
+    started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,7 +246,12 @@ impl AudioCapture {
             dir: dir.to_path_buf(),
             tracks: vec![],
             paused: Arc::clone(&paused),
+            started_at: None,
         };
+        // Open every device concurrently: CoreAudio start-up is the slow part,
+        // and doing it one source after another also made the later track start
+        // (and so line up) late in the mix.
+        let mut pending = vec![];
         for source in sources {
             if !matches!(
                 source,
@@ -218,31 +259,49 @@ impl AudioCapture {
             ) {
                 continue;
             }
-            match Self::start_track(dir, source, Arc::clone(&paused)) {
+            pending.push((
+                source.clone(),
+                Self::spawn_track(dir, source, Arc::clone(&paused)),
+            ));
+        }
+        let mut first_error: Option<CaptureError> = None;
+        for (source, spawned) in pending {
+            match spawned.and_then(PendingTrack::wait) {
                 Ok(track) => capture.tracks.push(track),
                 Err(message) => {
-                    let label = if *source == CaptureSource::Microphone {
-                        "Microphone"
-                    } else {
-                        "System audio"
-                    };
-                    capture.abort();
-                    return Err(unavailable(format!("{label}: {message}")));
+                    if first_error.is_none() {
+                        let label = if source == CaptureSource::Microphone {
+                            "Microphone"
+                        } else {
+                            "System audio"
+                        };
+                        first_error = Some(unavailable(format!("{label}: {message}")));
+                    }
                 }
             }
         }
+        if let Some(error) = first_error {
+            capture.abort();
+            return Err(error);
+        }
+        capture.started_at = capture.tracks.iter().map(|track| track.started_at).min();
         Ok(capture)
     }
 
-    fn start_track(
+    /// Moment the first audio sample was being recorded (None if no audio source).
+    pub fn started_at(&self) -> Option<Instant> {
+        self.started_at
+    }
+
+    fn spawn_track(
         dir: &Path,
         source: &CaptureSource,
         paused: Arc<AtomicBool>,
-    ) -> Result<Track, String> {
+    ) -> Result<PendingTrack, String> {
         let path = dir.join(file_name(source));
         let level = Arc::new(AtomicU32::new(SILENCE_DBFS.to_bits()));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<Instant, String>>(1);
         let thread_path = path.clone();
         let thread_level = Arc::clone(&level);
         let thread_source = source.clone();
@@ -278,7 +337,7 @@ impl AudioCapture {
                         let _ = ready_tx.send(Err(message));
                     }
                     Ok((stream, writer)) => {
-                        let _ = ready_tx.send(Ok(()));
+                        let _ = ready_tx.send(Ok(Instant::now()));
                         let _ = stop_rx.recv(); // block until stop (or sender dropped)
                         drop(stream);
                         if let Ok(mut guard) = writer.lock() {
@@ -291,21 +350,14 @@ impl AudioCapture {
             })
             .map_err(|e| format!("cannot start capture thread: {e}"))?;
 
-        match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Track {
-                source: source.clone(),
-                path,
-                level,
-                stop: stop_tx,
-                handle: Some(handle),
-            }),
-            Ok(Err(message)) => {
-                let _ = handle.join();
-                let _ = fs::remove_file(&path);
-                Err(message)
-            }
-            Err(_) => Err("capture thread exited unexpectedly".into()),
-        }
+        Ok(PendingTrack {
+            source: source.clone(),
+            path,
+            level,
+            stop: stop_tx,
+            handle,
+            ready: ready_rx,
+        })
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -337,16 +389,27 @@ impl AudioCapture {
 
     /// Stops all tracks, flushes their files and mixes them into `audio.wav`.
     pub fn finish(mut self) -> Result<FinishedAudio, CaptureError> {
-        let mut paths = vec![];
+        let origin = self.started_at;
+        let mut inputs: Vec<(PathBuf, f64)> = vec![];
         for track in self.tracks.drain(..) {
             let _ = track.stop.send(());
             if let Some(handle) = track.handle {
                 let _ = handle.join();
             }
-            paths.push(track.path);
+            // A stream that came up later than the first one is padded with
+            // silence so mic, system audio and video share one timeline.
+            let lead = origin
+                .map(|origin| {
+                    track
+                        .started_at
+                        .saturating_duration_since(origin)
+                        .as_secs_f64()
+                })
+                .unwrap_or(0.0);
+            inputs.push((track.path, lead));
         }
         let mixed_path = self.dir.join(MIXED_FILE_NAME);
-        let duration_seconds = mix_tracks(&paths, &mixed_path)
+        let duration_seconds = mix_tracks_with_leads(&inputs, &mixed_path)
             .map_err(|e| unavailable(format!("could not finalise recording: {e}")))?;
         Ok(FinishedAudio {
             mixed_path,
@@ -366,10 +429,12 @@ struct MonoResampler {
     next: f32,
     exhausted: bool,
     started: bool,
+    /// Frames of silence to emit before this track's first sample.
+    lead_frames: u64,
 }
 
 impl MonoResampler {
-    fn open(path: &Path, target_rate: u32) -> Result<Self, String> {
+    fn open(path: &Path, target_rate: u32, lead_frames: u64) -> Result<Self, String> {
         let reader = WavReader::open(path).map_err(|e| e.to_string())?;
         let spec = reader.spec();
         Ok(Self {
@@ -382,6 +447,7 @@ impl MonoResampler {
             next: 0.0,
             exhausted: false,
             started: false,
+            lead_frames,
         })
     }
 
@@ -395,6 +461,10 @@ impl MonoResampler {
     }
 
     fn next_sample(&mut self) -> Option<f32> {
+        if self.lead_frames > 0 {
+            self.lead_frames -= 1;
+            return Some(0.0);
+        }
         if !self.started {
             self.started = true;
             self.prev = self.read_frame()?;
@@ -425,8 +495,15 @@ impl MonoResampler {
 
 /// Mixes the given WAV tracks into one mono 16-bit file; returns its duration.
 pub fn mix_tracks(inputs: &[PathBuf], output: &Path) -> Result<f64, String> {
+    let aligned: Vec<(PathBuf, f64)> = inputs.iter().cloned().map(|path| (path, 0.0)).collect();
+    mix_tracks_with_leads(&aligned, output)
+}
+
+/// Like [`mix_tracks`], but each track is delayed by its lead (seconds) so
+/// streams that started at different moments line up in real time.
+pub fn mix_tracks_with_leads(inputs: &[(PathBuf, f64)], output: &Path) -> Result<f64, String> {
     let mut target_rate = 0;
-    for path in inputs {
+    for (path, _) in inputs {
         let spec = WavReader::open(path).map_err(|e| e.to_string())?.spec();
         target_rate = target_rate.max(spec.sample_rate);
     }
@@ -435,7 +512,10 @@ pub fn mix_tracks(inputs: &[PathBuf], output: &Path) -> Result<f64, String> {
     }
     let mut sources = inputs
         .iter()
-        .map(|path| MonoResampler::open(path, target_rate))
+        .map(|(path, lead)| {
+            let lead_frames = (lead.max(0.0) * target_rate as f64).round() as u64;
+            MonoResampler::open(path, target_rate, lead_frames)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut writer = WavWriter::create(
         output,
@@ -528,6 +608,31 @@ mod tests {
         assert_eq!(reader.spec().channels, 1);
         assert_eq!(reader.spec().sample_rate, 48_000);
         assert!(reader.duration() > 47_000);
+    }
+
+    #[test]
+    fn a_later_starting_track_is_delayed_in_the_mix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sys, mic, out) = (
+            dir.path().join("system.wav"),
+            dir.path().join("mic.wav"),
+            dir.path().join("audio.wav"),
+        );
+        write_tone(&sys, 48_000, 1, 1.0, 0.0); // silent system track
+        write_tone(&mic, 48_000, 1, 0.5, 0.5); // mic came up 0.4s later
+        let duration = mix_tracks_with_leads(&[(sys, 0.0), (mic, 0.4)], &out).unwrap();
+        assert!((duration - 1.0).abs() < 0.01, "{duration}");
+        let samples: Vec<i16> = WavReader::open(&out)
+            .unwrap()
+            .samples::<i16>()
+            .map(|s| s.unwrap())
+            .collect();
+        let first_loud = samples.iter().position(|s| s.abs() > 500).unwrap();
+        let at = first_loud as f64 / 48_000.0;
+        assert!(
+            (0.4..0.45).contains(&at),
+            "mic must not start before 0.4s, got {at}"
+        );
     }
 
     #[test]

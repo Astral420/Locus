@@ -84,9 +84,9 @@ jobs:
             --enable-decoder=h264,aac,pcm_s16le,rawvideo,pcm_f32le \
             --enable-muxer=mp4,null,wav,segment --enable-demuxer=concat,mov,wav,lavfi \
             --enable-protocol=file,pipe \
-            --enable-filter=scale,format,aresample,anull,null,testsrc,sine,nullsrc \
+            --enable-filter=scale,format,fps,setpts,aresample,anull,null,testsrc,sine,nullsrc \
             --enable-indev=lavfi --enable-parser=h264,aac \
-            --enable-bsf=aac_adtstoasc,h264_mp4toannexb \
+            --enable-bsf=aac_adtstoasc,h264_mp4toannexb,setts \
             $EXTRA
           make -j4 && make install
           { echo "FFmpeg ${FFMPEG_VERSION}"; echo "x264 $(cat ../_deps/x264.commit)"; echo; \

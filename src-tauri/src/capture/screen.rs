@@ -9,15 +9,29 @@
 use super::CaptureError;
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        mpsc::{self, RecvTimeoutError},
+        Arc, Mutex,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
 pub const VIDEO_FILE_NAME: &str = "recording.mp4";
-const STARTUP_PROBE: Duration = Duration::from_millis(1500);
+/// How long to wait for the first captured frame. First use on macOS can sit
+/// behind the Screen Recording permission prompt, so this is generous.
+const READY_TIMEOUT: Duration = Duration::from_secs(8);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const STDERR_TAIL_BYTES: usize = 2048;
+
+/// macOS: AVFoundation index of the primary screen. Listing devices spawns
+/// FFmpeg (slow), so it is done once, ideally by `prewarm()` before the user
+/// presses Record.
+#[cfg(target_os = "macos")]
+static SCREEN_DEVICE_INDEX: Mutex<Option<u32>> = Mutex::new(None);
 
 fn unavailable(message: impl Into<String>) -> CaptureError {
     CaptureError::SourceUnavailable(format!("Screen: {}", message.into()))
@@ -114,25 +128,35 @@ fn input_args(ffmpeg: &Path) -> Result<Vec<String>, CaptureError> {
     }
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-f",
-                "avfoundation",
-                "-list_devices",
-                "true",
-                "-i",
-                "",
-            ])
-            .output()
-            .map_err(|e| unavailable(format!("cannot run FFmpeg: {e}")))?;
-        let listing = String::from_utf8_lossy(&output.stderr);
-        let index = parse_avfoundation_screen_index(&listing).ok_or_else(|| {
-            unavailable(
-                "no screen device was found. Grant Screen Recording permission to Locus in \
-                 System Settings → Privacy & Security, then restart the app.",
-            )
-        })?;
+        let cached = SCREEN_DEVICE_INDEX.lock().ok().and_then(|guard| *guard);
+        let index = match cached {
+            Some(index) => index,
+            None => {
+                let output = Command::new(ffmpeg)
+                    .args([
+                        "-hide_banner",
+                        "-f",
+                        "avfoundation",
+                        "-list_devices",
+                        "true",
+                        "-i",
+                        "",
+                    ])
+                    .output()
+                    .map_err(|e| unavailable(format!("cannot run FFmpeg: {e}")))?;
+                let listing = String::from_utf8_lossy(&output.stderr);
+                let index = parse_avfoundation_screen_index(&listing).ok_or_else(|| {
+                    unavailable(
+                        "no screen device was found. Grant Screen Recording permission to Locus in \
+                         System Settings → Privacy & Security, then restart the app.",
+                    )
+                })?;
+                if let Ok(mut guard) = SCREEN_DEVICE_INDEX.lock() {
+                    *guard = Some(index);
+                }
+                index
+            }
+        };
         Ok(vec![
             "-f".into(),
             "avfoundation".into(),
@@ -174,9 +198,24 @@ fn segment_path(dir: &Path, ordinal: usize) -> PathBuf {
     dir.join(format!("screen-{ordinal:03}.mp4"))
 }
 
+/// Does the slow one-time work (locating FFmpeg, loading/Gatekeeper-checking the
+/// binary, listing screen devices) so pressing Record is fast. Safe to call any
+/// number of times, from any thread.
+pub fn prewarm() {
+    if let Some(ffmpeg) = locate_ffmpeg() {
+        let _ = input_args(&ffmpeg);
+        let _ = Command::new(&ffmpeg)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 struct Running {
     child: Child,
     path: PathBuf,
+    stderr_tail: Arc<Mutex<String>>,
 }
 
 pub struct ScreenCapture {
@@ -184,22 +223,100 @@ pub struct ScreenCapture {
     ffmpeg: PathBuf,
     input: Vec<String>,
     segments: Vec<PathBuf>,
+    /// Segment being recorded.
     running: Option<Running>,
-    /// How long after `epoch` the first frame segment started; used to align
-    /// video with audio, which starts first.
-    first_segment_delay: Duration,
-    epoch: Instant,
+    /// Segment that was told to stop and is flushing to disk.
+    stopping: Option<Running>,
+    /// When the first video frame of the recording was captured.
+    video_started_at: Instant,
 }
 
 #[derive(Debug)]
 pub struct FinishedScreen {
     pub segments: Vec<PathBuf>,
-    pub video_delay: Duration,
+    pub video_started_at: Instant,
+}
+
+/// Reads FFmpeg's `-progress` stream on a thread and reports when the first
+/// frame has been encoded: the moment recording has really begun.
+fn watch_progress(stdout: impl Read + Send + 'static) -> mpsc::Receiver<Instant> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut announced = false;
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if announced {
+                continue; // keep draining so FFmpeg never blocks on a full pipe
+            }
+            let frames = line
+                .strip_prefix("frame=")
+                .and_then(|n| n.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            if frames >= 1 {
+                announced = true;
+                let _ = tx.send(Instant::now());
+            }
+        }
+    });
+    rx
+}
+
+/// Keeps only the last few KB of stderr (for error messages) while draining it.
+fn drain_stderr(mut stderr: impl Read + Send + 'static) -> Arc<Mutex<String>> {
+    let tail = Arc::new(Mutex::new(String::new()));
+    let shared = Arc::clone(&tail);
+    thread::spawn(move || {
+        let mut buffer = [0u8; 1024];
+        while let Ok(read) = stderr.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            if let Ok(mut text) = shared.lock() {
+                text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                if text.len() > STDERR_TAIL_BYTES {
+                    let mut cut = text.len() - STDERR_TAIL_BYTES;
+                    while !text.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    text.drain(..cut);
+                }
+            }
+        }
+    });
+    tail
+}
+
+fn start_failure(
+    child: &mut Child,
+    tail: &Arc<Mutex<String>>,
+    path: &Path,
+    headline: &str,
+) -> CaptureError {
+    let _ = child.kill();
+    let status = child.wait().ok();
+    thread::sleep(Duration::from_millis(100)); // let the stderr drain thread catch up
+    let detail = tail
+        .lock()
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default();
+    let _ = fs::remove_file(path);
+    #[cfg(target_os = "macos")]
+    if let Ok(mut guard) = SCREEN_DEVICE_INDEX.lock() {
+        *guard = None; // displays may have changed; rediscover next time
+    }
+    let code = status.map(|s| format!(" ({s})")).unwrap_or_default();
+    unavailable(if detail.is_empty() {
+        format!("{headline}{code}")
+    } else {
+        format!(
+            "{headline}{code}: {}",
+            detail.lines().last().unwrap_or(&detail)
+        )
+    })
 }
 
 impl ScreenCapture {
-    /// `epoch` is the moment audio capture began.
-    pub fn start(dir: &Path, epoch: Instant) -> Result<Self, CaptureError> {
+    /// Starts recording and returns once the first frame has been captured.
+    pub fn start(dir: &Path) -> Result<Self, CaptureError> {
         let ffmpeg = locate_ffmpeg().ok_or_else(|| {
             unavailable(
                 "the bundled FFmpeg is missing from this installation. Reinstall Locus, or \
@@ -213,29 +330,50 @@ impl ScreenCapture {
             input,
             segments: vec![],
             running: None,
-            first_segment_delay: Duration::ZERO,
-            epoch,
+            stopping: None,
+            video_started_at: Instant::now(),
         };
-        capture.spawn_segment()?;
-        capture.first_segment_delay = capture.epoch.elapsed();
+        capture.video_started_at = capture.spawn_segment()?;
         Ok(capture)
     }
 
-    fn spawn_segment(&mut self) -> Result<(), CaptureError> {
+    /// When the first video frame was captured (t=0 of the video timeline).
+    pub fn started_at(&self) -> Instant {
+        self.video_started_at
+    }
+
+    /// Spawns a new segment and blocks until its first frame exists. Returns
+    /// the instant that frame was captured.
+    fn spawn_segment(&mut self) -> Result<Instant, CaptureError> {
         let path = segment_path(&self.dir, self.segments.len());
-        let mut command = Command::new(&self.ffmpeg);
-        command
-            .args(["-hide_banner", "-loglevel", "error"])
+        let mut child = Command::new(&self.ffmpeg)
+            // `-progress` lets us see the first frame the moment it is encoded.
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-progress",
+                "pipe:1",
+                "-stats_period",
+                "0.1",
+            ])
             .args(&self.input)
             .args([
                 "-an",
+                // `setpts` puts the first captured frame at t=0. AVFoundation stamps
+                // frames relative to when the device was opened, so without this the
+                // first frame sat ~2s into the file and video lagged audio by that much.
                 // Retina/odd-sized displays: H.264 4:2:0 needs even dimensions.
                 "-vf",
-                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+                "setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
                 "-c:v",
                 "libx264",
                 "-preset",
                 "veryfast",
+                // No lookahead/B-frame buffering: first frame out immediately.
+                "-tune",
+                "zerolatency",
                 "-crf",
                 "26",
                 "-r",
@@ -248,57 +386,77 @@ impl ScreenCapture {
             ])
             .arg(&path)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| unavailable(format!("cannot start FFmpeg: {e}")))?;
-        // Fail fast (bad permission, missing encoder, no display) instead of
-        // showing "recording" while nothing is captured.
-        let probe_until = Instant::now() + STARTUP_PROBE;
-        while Instant::now() < probe_until {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let mut detail = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        let _ = stderr.read_to_string(&mut detail);
+        let ready = watch_progress(child.stdout.take().expect("piped stdout"));
+        let stderr_tail = drain_stderr(child.stderr.take().expect("piped stderr"));
+
+        let deadline = Instant::now() + READY_TIMEOUT;
+        let started_at = loop {
+            match ready.recv_timeout(Duration::from_millis(25)) {
+                Ok(at) => break at,
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Ok(Some(_)) = child.try_wait() {
+                        return Err(start_failure(
+                            &mut child,
+                            &stderr_tail,
+                            &path,
+                            "FFmpeg stopped before capturing a frame",
+                        ));
                     }
-                    let detail = detail.trim();
-                    let _ = fs::remove_file(&path);
-                    return Err(unavailable(format!(
-                        "FFmpeg stopped immediately ({status}){}",
-                        if detail.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {}", detail.lines().last().unwrap_or(detail))
-                        }
-                    )));
+                    if Instant::now() >= deadline {
+                        return Err(start_failure(
+                            &mut child,
+                            &stderr_tail,
+                            &path,
+                            "no frame was captured within 8 seconds (is Screen Recording \
+                             permission granted?)",
+                        ));
+                    }
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(e) => return Err(unavailable(format!("FFmpeg status check failed: {e}"))),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(start_failure(
+                        &mut child,
+                        &stderr_tail,
+                        &path,
+                        "FFmpeg exited before capturing a frame",
+                    ));
+                }
             }
-        }
+        };
         self.segments.push(path.clone());
-        self.running = Some(Running { child, path });
-        Ok(())
+        self.running = Some(Running {
+            child,
+            path,
+            stderr_tail,
+        });
+        Ok(started_at)
     }
 
-    /// Gracefully ends the current segment so its MP4 is finalised.
-    fn stop_segment(&mut self) {
-        let Some(mut running) = self.running.take() else {
+    /// Tells the current segment to stop *now* without waiting for it to flush,
+    /// so the caller can pause/stop audio at the same instant.
+    pub fn request_stop(&mut self) {
+        if let Some(mut running) = self.running.take() {
+            if let Some(mut stdin) = running.child.stdin.take() {
+                let _ = stdin.write_all(b"q\n");
+                let _ = stdin.flush();
+            }
+            self.stopping = Some(running);
+        }
+    }
+
+    /// Waits for a segment told to stop to finalise its MP4.
+    pub fn complete_stop(&mut self) {
+        let Some(mut running) = self.stopping.take() else {
             return;
         };
-        if let Some(mut stdin) = running.child.stdin.take() {
-            let _ = stdin.write_all(b"q\n");
-            let _ = stdin.flush();
-        }
         let deadline = Instant::now() + STOP_TIMEOUT;
         loop {
             match running.child.try_wait() {
                 Ok(Some(_)) => break,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(50))
-                }
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
                 _ => {
                     let _ = running.child.kill();
                     let _ = running.child.wait();
@@ -314,12 +472,16 @@ impl ScreenCapture {
             let _ = fs::remove_file(&running.path);
             self.segments.retain(|p| p != &running.path);
         }
+        let _ = &running.stderr_tail;
     }
 
     pub fn pause(&mut self) {
-        self.stop_segment();
+        self.request_stop();
+        self.complete_stop();
     }
 
+    /// Opens a new segment and blocks until it is really recording, so the
+    /// caller can un-pause audio at that moment and no drift builds up.
     pub fn resume(&mut self) -> Result<(), CaptureError> {
         if self.running.is_none() {
             self.spawn_segment()?;
@@ -336,15 +498,17 @@ impl ScreenCapture {
     }
 
     pub fn finish(mut self) -> FinishedScreen {
-        self.stop_segment();
+        self.request_stop();
+        self.complete_stop();
         FinishedScreen {
             segments: std::mem::take(&mut self.segments),
-            video_delay: self.first_segment_delay,
+            video_started_at: self.video_started_at,
         }
     }
 
     pub fn abort(mut self) {
-        self.stop_segment();
+        self.request_stop();
+        self.complete_stop();
         for segment in self.segments.drain(..) {
             let _ = fs::remove_file(segment);
         }
@@ -353,7 +517,10 @@ impl ScreenCapture {
 
 impl Drop for ScreenCapture {
     fn drop(&mut self) {
-        if let Some(mut running) = self.running.take() {
+        for mut running in [self.running.take(), self.stopping.take()]
+            .into_iter()
+            .flatten()
+        {
             let _ = running.child.kill();
             let _ = running.child.wait();
         }
@@ -373,56 +540,123 @@ fn write_concat_list(list_path: &Path, segments: &[PathBuf]) -> std::io::Result<
     list.sync_all()
 }
 
-/// Muxes video segments + mixed audio into one H.264/AAC MP4 with the index at
-/// the front so webview playback and seeking are immediate.
-pub fn mux_recording(
-    ffmpeg: &Path,
-    finished: &FinishedScreen,
-    audio: &Path,
-    output: &Path,
-) -> Result<(), String> {
-    if finished.segments.is_empty() {
-        return Err("no video segments were captured".into());
-    }
-    let dir = output.parent().unwrap_or(Path::new("."));
-    let list_path = dir.join("screen-segments.txt");
-    write_concat_list(&list_path, &finished.segments).map_err(|e| e.to_string())?;
-    let temp = output.with_extension("mp4.part");
-    let mut command = Command::new(ffmpeg);
-    command.args(["-hide_banner", "-loglevel", "error"]);
-    if finished.video_delay > Duration::from_millis(50) {
-        command.args([
-            "-itsoffset",
-            &format!("{:.3}", finished.video_delay.as_secs_f64()),
-        ]);
-    }
-    let status = command
-        .args(["-f", "concat", "-safe", "0", "-i"])
-        .arg(&list_path)
-        .arg("-i")
-        .arg(audio)
+/// Lossless re-time of one segment so its first frame is at t=0, whatever clock
+/// the capture device used. Returns false (caller keeps the original) on failure.
+fn normalize_segment(ffmpeg: &Path, segment: &Path, output: &Path) -> bool {
+    let ok = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(segment)
         .args([
             "-map",
             "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
+            "-c",
             "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-movflags",
-            "+faststart",
+            "-bsf:v",
+            "setts=ts=TS-STARTDTS",
+            "-an",
             "-f",
             "mp4",
             "-y",
         ])
+        .arg(output)
+        .stdin(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !ok {
+        let _ = fs::remove_file(output);
+    }
+    ok
+}
+
+/// The "Duration"/"Stream" lines FFmpeg prints for a file (includes each stream's
+/// `start`), for the sync report next to the recording.
+pub fn describe_streams(ffmpeg: &Path, file: &Path) -> String {
+    Command::new(ffmpeg)
+        .args(["-hide_banner", "-i"])
+        .arg(file)
+        .stdin(Stdio::null())
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .filter(|line| line.contains("Duration:") || line.contains("Stream #"))
+                .map(|line| line.trim().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Muxes the video segments (and, if any, the mixed audio) into one H.264/AAC
+/// MP4 with the index at the front so webview playback and seeking are immediate.
+///
+/// `audio` is `(wav, offset_seconds)` where the offset is how much later the
+/// audio began than the first video frame: positive delays the audio, negative
+/// trims the audio's head (it was recording before the first frame existed).
+/// Video is never shifted, so the file never opens on a black lead-in.
+pub fn mux_recording(
+    ffmpeg: &Path,
+    segments: &[PathBuf],
+    audio: Option<(&Path, f64)>,
+    output: &Path,
+) -> Result<(), String> {
+    if segments.is_empty() {
+        return Err("no video segments were captured".into());
+    }
+    let dir = output.parent().unwrap_or(Path::new("."));
+    let list_path = dir.join("screen-segments.txt");
+    // Re-time every segment to start at 0 before concatenating, so the video
+    // timeline is exactly [0, duration) and audio offsets mean what they say.
+    let mut timed: Vec<PathBuf> = Vec::with_capacity(segments.len());
+    let mut normalized: Vec<PathBuf> = vec![];
+    for (index, segment) in segments.iter().enumerate() {
+        let candidate = dir.join(format!("screen-norm-{index:03}.mp4"));
+        if normalize_segment(ffmpeg, segment, &candidate) {
+            normalized.push(candidate.clone());
+            timed.push(candidate);
+        } else {
+            timed.push(segment.clone());
+        }
+    }
+    let written = write_concat_list(&list_path, &timed).map_err(|e| e.to_string());
+    if let Err(error) = written {
+        for file in &normalized {
+            let _ = fs::remove_file(file);
+        }
+        return Err(error);
+    }
+    let temp = output.with_extension("mp4.part");
+    let mut command = Command::new(ffmpeg);
+    command
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(["-f", "concat", "-safe", "0", "-i"])
+        .arg(&list_path);
+    match audio {
+        Some((wav, offset)) => {
+            if offset > 0.02 {
+                command.args(["-itsoffset", &format!("{offset:.3}")]);
+            } else if offset < -0.02 {
+                command.args(["-ss", &format!("{:.3}", -offset)]);
+            }
+            command.arg("-i").arg(wav).args([
+                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+            ]);
+        }
+        None => {
+            command.args(["-map", "0:v:0", "-c:v", "copy", "-an"]);
+        }
+    }
+    let status = command
+        .args(["-movflags", "+faststart", "-f", "mp4", "-y"])
         .arg(&temp)
         .stdin(Stdio::null())
         .status()
         .map_err(|e| format!("cannot run FFmpeg: {e}"))?;
     let _ = fs::remove_file(&list_path);
+    for file in &normalized {
+        let _ = fs::remove_file(file);
+    }
     if !status.success() {
         let _ = fs::remove_file(&temp);
         return Err(format!(
@@ -431,8 +665,11 @@ pub fn mux_recording(
         ));
     }
     fs::rename(&temp, output).map_err(|e| e.to_string())?;
-    for segment in &finished.segments {
-        let _ = fs::remove_file(segment);
+    // LOCUS_KEEP_SEGMENTS=1 keeps the raw video pieces for debugging sync.
+    if std::env::var_os("LOCUS_KEEP_SEGMENTS").is_none() {
+        for segment in segments {
+            let _ = fs::remove_file(segment);
+        }
     }
     Ok(())
 }
@@ -523,16 +760,7 @@ mod tests {
         }
         writer.finalize().unwrap();
         let out = dir.path().join(VIDEO_FILE_NAME);
-        mux_recording(
-            &ffmpeg,
-            &FinishedScreen {
-                segments: vec![seg.clone()],
-                video_delay: Duration::from_millis(300),
-            },
-            &wav,
-            &out,
-        )
-        .unwrap();
+        mux_recording(&ffmpeg, std::slice::from_ref(&seg), Some((&wav, 0.3)), &out).unwrap();
         assert!(out.is_file());
         assert!(!seg.exists(), "segments are removed after a successful mux");
         let probe = Command::new(&ffmpeg)
@@ -554,19 +782,34 @@ mod tests {
         };
         std::env::set_var("LOCUS_SCREEN_TEST_INPUT", "lavfi");
         let dir = tempfile::tempdir().unwrap();
-        let epoch = Instant::now();
-        let mut capture = match ScreenCapture::start(dir.path(), epoch) {
+        let requested = Instant::now();
+        let mut capture = match ScreenCapture::start(dir.path()) {
             Ok(capture) => capture,
             Err(error) => {
                 skip_or_fail(&format!("screen capture could not start: {error}"));
                 return; // FFmpeg without libx264/lavfi: nothing to verify
             }
         };
+        // start() returns as soon as the first frame exists, not after a fixed wait.
+        assert!(
+            requested.elapsed() < Duration::from_millis(2500),
+            "start took {:?}",
+            requested.elapsed()
+        );
+        assert!(capture.started_at() >= requested);
         std::thread::sleep(Duration::from_millis(1200));
         assert!(capture.is_alive());
-        capture.pause();
+        // Pause is request + complete, split so audio can pause in between.
+        capture.request_stop();
+        capture.complete_stop();
         assert!(capture.is_alive(), "paused is not a failure");
+        let resumed = Instant::now();
         capture.resume().unwrap();
+        assert!(
+            resumed.elapsed() < Duration::from_millis(2500),
+            "resume waits for the first frame, not a fixed delay: {:?}",
+            resumed.elapsed()
+        );
         std::thread::sleep(Duration::from_millis(1200));
         let finished = capture.finish();
         assert_eq!(
@@ -595,7 +838,7 @@ mod tests {
         }
         writer.finalize().unwrap();
         let out = dir.path().join(VIDEO_FILE_NAME);
-        mux_recording(&ffmpeg, &finished, &wav, &out).unwrap();
+        mux_recording(&ffmpeg, &finished.segments, Some((&wav, -0.5)), &out).unwrap();
         let probe = Command::new(&ffmpeg)
             .args(["-v", "error", "-i"])
             .arg(&out)
@@ -631,16 +874,202 @@ mod tests {
         );
     }
 
+    fn ffprobe_for_test(ffmpeg: &Path) -> Option<PathBuf> {
+        let probe = ffmpeg.with_file_name(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+        let found = probe.is_file().then_some(probe).or_else(|| {
+            [
+                "/usr/bin/ffprobe",
+                "/opt/homebrew/bin/ffprobe",
+                "/usr/local/bin/ffprobe",
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_file())
+        });
+        if found.is_none() {
+            skip_or_fail("ffprobe not available");
+        }
+        found
+    }
+
+    /// (start_time, duration) in seconds of the first stream of `kind` ("v"/"a").
+    fn stream_times(ffprobe: &Path, file: &Path, kind: &str) -> (f64, f64) {
+        let out = Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                &format!("{kind}:0"),
+                "-show_entries",
+                "stream=start_time,duration",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(file)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let mut parts = text.split(',');
+        let start = parts
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(f64::NAN);
+        let duration = parts
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(f64::NAN);
+        (start, duration)
+    }
+
+    fn make_segment_and_wav(ffmpeg: &Path, dir: &Path) -> Option<(PathBuf, PathBuf)> {
+        let seg = dir.join("screen-000.mp4");
+        let ok = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=30:duration=3",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof",
+                "-y",
+            ])
+            .arg(&seg)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            skip_or_fail("no libx264/lavfi in this FFmpeg build");
+            return None;
+        }
+        let wav = dir.join("audio.wav");
+        let mut writer = hound::WavWriter::create(
+            &wav,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for n in 0..(48_000 * 3) {
+            writer
+                .write_sample(((n as f32 * 0.05).sin() * 8000.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        Some((seg, wav))
+    }
+
+    /// Regression: the old mux shifted the VIDEO by the start-up delay, so the
+    /// file opened on a black screen while audio was already playing.
+    #[test]
+    fn video_always_starts_at_zero_and_audio_is_aligned_to_it() {
+        let Some(ffmpeg) = ffmpeg_for_test() else {
+            return;
+        };
+        let Some(ffprobe) = ffprobe_for_test(&ffmpeg) else {
+            return;
+        };
+
+        // Audio began 0.8s BEFORE the first video frame -> its head is trimmed.
+        let dir = tempfile::tempdir().unwrap();
+        let Some((seg, wav)) = make_segment_and_wav(&ffmpeg, dir.path()) else {
+            return;
+        };
+        let out = dir.path().join("early_audio.mp4");
+        mux_recording(&ffmpeg, &[seg], Some((&wav, -0.8)), &out).unwrap();
+        let (v_start, _) = stream_times(&ffprobe, &out, "v");
+        let (a_start, a_dur) = stream_times(&ffprobe, &out, "a");
+        assert!(v_start.abs() < 0.05, "video must start at 0, got {v_start}");
+        assert!(
+            a_start.abs() < 0.08,
+            "trimmed audio starts with the video, got {a_start}"
+        );
+        assert!(
+            (a_dur - 2.2).abs() < 0.15,
+            "0.8s trimmed from 3s audio, got {a_dur}"
+        );
+
+        // Audio began 0.5s AFTER the first video frame -> audio is delayed, video untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let Some((seg, wav)) = make_segment_and_wav(&ffmpeg, dir.path()) else {
+            return;
+        };
+        let out = dir.path().join("late_audio.mp4");
+        mux_recording(&ffmpeg, &[seg], Some((&wav, 0.5)), &out).unwrap();
+        let (v_start, _) = stream_times(&ffprobe, &out, "v");
+        let (a_start, _) = stream_times(&ffprobe, &out, "a");
+        assert!(v_start.abs() < 0.05, "video must start at 0, got {v_start}");
+        assert!(
+            (a_start - 0.5).abs() < 0.08,
+            "audio delayed by 0.5s, got {a_start}"
+        );
+    }
+
+    #[test]
+    fn normalizing_a_segment_keeps_it_playable_and_starting_at_zero() {
+        let Some(ffmpeg) = ffmpeg_for_test() else {
+            return;
+        };
+        let Some(ffprobe) = ffprobe_for_test(&ffmpeg) else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let Some((seg, _wav)) = make_segment_and_wav(&ffmpeg, dir.path()) else {
+            return;
+        };
+        let out = dir.path().join("norm.mp4");
+        assert!(
+            normalize_segment(&ffmpeg, &seg, &out),
+            "setts remux must work"
+        );
+        let (start, duration) = stream_times(&ffprobe, &out, "v");
+        assert!(start.abs() < 0.05, "start {start}");
+        assert!((duration - 3.0).abs() < 0.2, "duration {duration}");
+        let report = describe_streams(&ffmpeg, &out);
+        assert!(report.contains("Video: h264"), "{report}");
+    }
+
+    #[test]
+    fn screen_only_recordings_mux_without_an_audio_stream() {
+        let Some(ffmpeg) = ffmpeg_for_test() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let Some((seg, _wav)) = make_segment_and_wav(&ffmpeg, dir.path()) else {
+            return;
+        };
+        let out = dir.path().join("video_only.mp4");
+        mux_recording(&ffmpeg, &[seg], None, &out).unwrap();
+        let probe = Command::new(&ffmpeg)
+            .args(["-hide_banner", "-i"])
+            .arg(&out)
+            .output()
+            .unwrap();
+        let info = String::from_utf8_lossy(&probe.stderr);
+        assert!(info.contains("Video: h264"), "{info}");
+        assert!(!info.contains("Audio:"), "{info}");
+    }
+
     #[test]
     fn empty_segment_list_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let err = mux_recording(
             Path::new("ffmpeg"),
-            &FinishedScreen {
-                segments: vec![],
-                video_delay: Duration::ZERO,
-            },
-            &dir.path().join("a.wav"),
+            &[],
+            Some((&dir.path().join("a.wav"), 0.0)),
             &dir.path().join("o.mp4"),
         )
         .unwrap_err();
