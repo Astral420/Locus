@@ -16,7 +16,7 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread::JoinHandle,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// Level reported for silence / no signal / paused.
@@ -39,12 +39,58 @@ pub fn rms_dbfs(samples: &[f32]) -> f32 {
 
 type SharedWriter = Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>;
 
+/// How often a track's WAV header and buffered samples are brought up to date
+/// on disk. A killed process loses at most this much audio (FR12.3 allows 5 s),
+/// and the file stays readable because the header is rewritten each time.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Shared between a track's audio callback and the manager's watchdog.
+#[derive(Debug)]
+pub struct TrackHealth {
+    failure: Mutex<Option<String>>,
+    last_checkpoint: Mutex<Instant>,
+}
+
+impl TrackHealth {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            failure: Mutex::new(None),
+            last_checkpoint: Mutex::new(Instant::now()),
+        })
+    }
+
+    fn fail(&self, message: String) {
+        if let Ok(mut slot) = self.failure.lock() {
+            slot.get_or_insert(message);
+        }
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        self.failure.lock().ok().and_then(|f| f.clone())
+    }
+
+    fn checkpoint_due(&self) -> bool {
+        match self.last_checkpoint.lock() {
+            Ok(mut last) if last.elapsed() >= CHECKPOINT_INTERVAL => {
+                *last = Instant::now();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn describe_write_error(error: &dyn std::fmt::Display) -> String {
+    format!("cannot write audio to disk (is the disk full?): {error}")
+}
+
 /// Audio-callback side of a track: writes samples and publishes the level.
 #[derive(Clone)]
 struct Sink {
     writer: SharedWriter,
     level: Arc<AtomicU32>,
     paused: Arc<AtomicBool>,
+    health: Arc<TrackHealth>,
 }
 
 impl Sink {
@@ -59,8 +105,14 @@ impl Sink {
             if let Some(writer) = guard.as_mut() {
                 for sample in samples {
                     let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                    if writer.write_sample(value).is_err() {
-                        break;
+                    if let Err(error) = writer.write_sample(value) {
+                        self.health.fail(describe_write_error(&error));
+                        return;
+                    }
+                }
+                if self.health.checkpoint_due() {
+                    if let Err(error) = writer.flush() {
+                        self.health.fail(describe_write_error(&error));
                     }
                 }
             }
@@ -71,6 +123,7 @@ impl Sink {
 struct Track {
     source: CaptureSource,
     path: PathBuf,
+    health: Arc<TrackHealth>,
     level: Arc<AtomicU32>,
     stop: mpsc::Sender<()>,
     handle: Option<JoinHandle<()>>,
@@ -82,6 +135,7 @@ struct Track {
 struct PendingTrack {
     source: CaptureSource,
     path: PathBuf,
+    health: Arc<TrackHealth>,
     level: Arc<AtomicU32>,
     stop: mpsc::Sender<()>,
     handle: JoinHandle<()>,
@@ -94,6 +148,7 @@ impl PendingTrack {
             Ok(Ok(started_at)) => Ok(Track {
                 source: self.source,
                 path: self.path,
+                health: self.health,
                 level: self.level,
                 stop: self.stop,
                 handle: Some(self.handle),
@@ -121,6 +176,10 @@ pub struct AudioCapture {
 pub struct FinishedAudio {
     pub mixed_path: PathBuf,
     pub duration_seconds: f64,
+    /// Per-source mono WAVs aligned to the same t=0 as the mix (lead silence
+    /// applied), for the separate tracks in the final MP4 (FR1.13). Empty if an
+    /// aligned copy could not be written; the mix is still valid then.
+    pub tracks: Vec<(CaptureSource, PathBuf)>,
 }
 
 fn unavailable(message: impl Into<String>) -> CaptureError {
@@ -226,12 +285,133 @@ fn build_stream(
     stream.map_err(|e| format!("could not open audio stream: {e}"))
 }
 
-fn file_name(source: &CaptureSource) -> &'static str {
+pub(super) fn file_name(source: &CaptureSource) -> &'static str {
     match source {
         CaptureSource::SystemAudio => "system_audio.wav",
         CaptureSource::Microphone => "microphone.wav",
         CaptureSource::Screen => "screen.wav",
     }
+}
+
+/// Records ScreenCaptureKit system audio into `path` (mono, 48 kHz) until told
+/// to stop, with the same pause and level behaviour as the cpal tracks.
+#[cfg(target_os = "macos")]
+fn run_screencapturekit_track(
+    path: &Path,
+    level: Arc<AtomicU32>,
+    health: Arc<TrackHealth>,
+    paused: Arc<AtomicBool>,
+    ready: mpsc::SyncSender<Result<Instant, String>>,
+    stop: mpsc::Receiver<()>,
+) {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: 48_000,
+        bits_per_sample: 16,
+        sample_format: WavFormat::Int,
+    };
+    let writer = match WavWriter::create(path, spec) {
+        Ok(writer) => writer,
+        Err(e) => {
+            let _ = ready.send(Err(format!("cannot create recording file: {e}")));
+            return;
+        }
+    };
+    let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
+    let sink = Sink {
+        writer: Arc::clone(&writer),
+        level,
+        paused,
+        health,
+    };
+    match super::macos_sck::SystemAudioStream::start(move |samples| sink.push(samples)) {
+        Err(message) => {
+            let _ = ready.send(Err(message));
+        }
+        Ok((stream, started_at)) => {
+            let _ = ready.send(Ok(started_at));
+            let _ = stop.recv(); // until stop (or the sender is dropped)
+            drop(stream);
+            if let Ok(mut guard) = writer.lock() {
+                if let Some(writer) = guard.take() {
+                    let _ = writer.finalize();
+                }
+            }
+        }
+    }
+}
+
+/// Test hook: an audio capture whose only track has already reported a write
+/// failure, with one second of real audio on disk (what a full disk leaves).
+#[cfg(test)]
+pub(super) fn failed_capture_for_test(dir: &Path, message: &str) -> AudioCapture {
+    let path = dir.join(file_name(&CaptureSource::Microphone));
+    let mut writer = WavWriter::create(
+        &path,
+        WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: WavFormat::Int,
+        },
+    )
+    .unwrap();
+    for n in 0..48_000 {
+        writer
+            .write_sample(
+                ((n as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * 9000.0) as i16,
+            )
+            .unwrap();
+    }
+    writer.finalize().unwrap();
+    let health = TrackHealth::new();
+    health.fail(message.to_string());
+    let now = Instant::now();
+    AudioCapture {
+        dir: dir.to_path_buf(),
+        tracks: vec![Track {
+            source: CaptureSource::Microphone,
+            path,
+            health,
+            level: Arc::new(AtomicU32::new(SILENCE_DBFS.to_bits())),
+            stop: mpsc::channel().0,
+            handle: None,
+            started_at: now,
+        }],
+        paused: Arc::new(AtomicBool::new(false)),
+        started_at: Some(now),
+    }
+}
+
+/// Test hook: a real `Sink` (header checkpointing, failure reporting) writing
+/// to `path`, driven by pushing sample chunks.
+#[cfg(test)]
+pub(super) fn open_test_sink(
+    path: &Path,
+) -> Result<(impl Fn(&[f32]) + Send + Sync + 'static, Arc<TrackHealth>), String> {
+    let writer = WavWriter::create(
+        path,
+        WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: WavFormat::Int,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let health = TrackHealth::new();
+    let sink = Sink {
+        writer: Arc::new(Mutex::new(Some(writer))),
+        level: Arc::new(AtomicU32::new(SILENCE_DBFS.to_bits())),
+        paused: Arc::new(AtomicBool::new(false)),
+        health: Arc::clone(&health),
+    };
+    Ok((move |samples: &[f32]| sink.push(samples), health))
+}
+
+/// Aligned (lead-padded) copy of a source's WAV, feeding the final MP4.
+fn aligned_file_name(source: &CaptureSource) -> String {
+    file_name(source).replace(".wav", ".aligned.wav")
 }
 
 impl AudioCapture {
@@ -293,6 +473,30 @@ impl AudioCapture {
         self.started_at
     }
 
+    /// The first write or flush error any track hit (disk full, device gone).
+    /// Recording continues to the extent it can; the manager stops and
+    /// preserves what exists.
+    pub fn health(&self) -> Option<String> {
+        self.tracks.iter().find_map(|track| track.health.failure())
+    }
+
+    /// Seconds each track began after the earliest one; recovery needs these
+    /// to line the tracks up again after a crash.
+    pub fn track_leads(&self) -> Vec<(CaptureSource, f64)> {
+        let Some(origin) = self.started_at else {
+            return Vec::new();
+        };
+        self.tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.source.clone(),
+                    t.started_at.saturating_duration_since(origin).as_secs_f64(),
+                )
+            })
+            .collect()
+    }
+
     fn spawn_track(
         dir: &Path,
         source: &CaptureSource,
@@ -305,11 +509,29 @@ impl AudioCapture {
         let thread_path = path.clone();
         let thread_level = Arc::clone(&level);
         let thread_source = source.clone();
+        let health = TrackHealth::new();
+        let thread_health = Arc::clone(&health);
 
         // cpal streams are not `Send`, so each one lives on its own thread.
         let handle = std::thread::Builder::new()
             .name(format!("locus-capture-{}", file_name(source)))
             .spawn(move || {
+                // macOS native backend: system audio from ScreenCaptureKit
+                // (macOS 13+) instead of the CoreAudio tap (14.6+).
+                #[cfg(target_os = "macos")]
+                if thread_source == CaptureSource::SystemAudio
+                    && super::macos::native_audio_selected()
+                {
+                    run_screencapturekit_track(
+                        &thread_path,
+                        thread_level,
+                        thread_health,
+                        paused,
+                        ready_tx,
+                        stop_rx,
+                    );
+                    return;
+                }
                 let setup = (|| -> Result<(Stream, SharedWriter), String> {
                     let (device, config) = pick_device(&thread_source)?;
                     let spec = WavSpec {
@@ -325,6 +547,7 @@ impl AudioCapture {
                         writer: Arc::clone(&writer),
                         level: thread_level,
                         paused,
+                        health: thread_health,
                     };
                     let stream = build_stream(&device, &config, sink)?;
                     stream
@@ -353,6 +576,7 @@ impl AudioCapture {
         Ok(PendingTrack {
             source: source.clone(),
             path,
+            health,
             level,
             stop: stop_tx,
             handle,
@@ -391,6 +615,7 @@ impl AudioCapture {
     pub fn finish(mut self) -> Result<FinishedAudio, CaptureError> {
         let origin = self.started_at;
         let mut inputs: Vec<(PathBuf, f64)> = vec![];
+        let mut sources: Vec<CaptureSource> = vec![];
         for track in self.tracks.drain(..) {
             let _ = track.stop.send(());
             if let Some(handle) = track.handle {
@@ -406,14 +631,23 @@ impl AudioCapture {
                         .as_secs_f64()
                 })
                 .unwrap_or(0.0);
+            sources.push(track.source.clone());
             inputs.push((track.path, lead));
         }
         let mixed_path = self.dir.join(MIXED_FILE_NAME);
         let duration_seconds = mix_tracks_with_leads(&inputs, &mixed_path)
             .map_err(|e| unavailable(format!("could not finalise recording: {e}")))?;
+        let mut tracks = Vec::new();
+        for (source, input) in sources.into_iter().zip(&inputs) {
+            let aligned = self.dir.join(aligned_file_name(&source));
+            if mix_tracks_with_leads(std::slice::from_ref(input), &aligned).is_ok() {
+                tracks.push((source, aligned));
+            }
+        }
         Ok(FinishedAudio {
             mixed_path,
             duration_seconds,
+            tracks,
         })
     }
 }
@@ -587,6 +821,27 @@ mod tests {
             "0.5 amplitude is about -6 dBFS, got {half}"
         );
         assert!(rms_dbfs(&[0.01; 64]) < half);
+    }
+
+    #[test]
+    fn aligned_single_track_keeps_its_lead_and_length() {
+        // The per-source copy used for the separate MP4 streams: one input,
+        // delayed by its lead, must be lead + duration long and mono.
+        let dir = tempfile::tempdir().unwrap();
+        let (src, out) = (
+            dir.path().join("mic.wav"),
+            dir.path().join("mic.aligned.wav"),
+        );
+        write_tone(&src, 48_000, 2, 1.0, 0.3);
+        let seconds = mix_tracks_with_leads(&[(src, 0.5)], &out).unwrap();
+        assert!((seconds - 1.5).abs() < 0.01, "got {seconds}");
+        let reader = WavReader::open(&out).unwrap();
+        assert_eq!(reader.spec().channels, 1);
+        let silent_head = reader
+            .into_samples::<i16>()
+            .take(24_000)
+            .all(|s| s.unwrap() == 0);
+        assert!(silent_head, "the first 0.5 s must be silence");
     }
 
     #[test]

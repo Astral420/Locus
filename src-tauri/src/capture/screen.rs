@@ -342,6 +342,12 @@ impl ScreenCapture {
         self.video_started_at
     }
 
+    /// Segments on disk. Only call while paused or stopped: while recording
+    /// the last entry is still being written.
+    pub fn completed_segments(&self) -> Vec<PathBuf> {
+        self.segments.clone()
+    }
+
     /// Spawns a new segment and blocks until its first frame exists. Returns
     /// the instant that frame was captured.
     fn spawn_segment(&mut self) -> Result<Instant, CaptureError> {
@@ -528,7 +534,7 @@ impl Drop for ScreenCapture {
 }
 
 /// Builds the concat list for the video segments.
-fn write_concat_list(list_path: &Path, segments: &[PathBuf]) -> std::io::Result<()> {
+pub(super) fn write_concat_list(list_path: &Path, segments: &[PathBuf]) -> std::io::Result<()> {
     let mut list = fs::File::create(list_path)?;
     for segment in segments {
         writeln!(
@@ -542,7 +548,7 @@ fn write_concat_list(list_path: &Path, segments: &[PathBuf]) -> std::io::Result<
 
 /// Lossless re-time of one segment so its first frame is at t=0, whatever clock
 /// the capture device used. Returns false (caller keeps the original) on failure.
-fn normalize_segment(ffmpeg: &Path, segment: &Path, output: &Path) -> bool {
+pub(super) fn normalize_segment(ffmpeg: &Path, segment: &Path, output: &Path) -> bool {
     let ok = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(segment)

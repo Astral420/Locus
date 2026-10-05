@@ -26,6 +26,13 @@ pub struct Segment {
     pub duration_seconds: f64,
     pub checksum: Option<String>,
 }
+/// Seconds a source's first sample came after the earliest source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrackLead {
+    pub source: String,
+    pub lead_seconds: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Manifest {
     pub capture_id: String,
@@ -33,6 +40,19 @@ pub struct Manifest {
     pub generation: u64,
     pub state: String,
     pub segments: Vec<Segment>,
+    // The fields below let a crashed capture be rebuilt from what is on disk.
+    // They default so manifests written before NC-5 still load.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub has_video: bool,
+    /// Seconds the audio began after the first video frame (negative: before).
+    #[serde(default)]
+    pub audio_offset_seconds: f64,
+    #[serde(default)]
+    pub track_leads: Vec<TrackLead>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 pub struct Encoder {
@@ -56,6 +76,7 @@ impl Encoder {
                 generation: 0,
                 state: "recording".into(),
                 segments: vec![],
+                ..Manifest::default()
             },
         };
         encoder.persist()?;
@@ -68,6 +89,41 @@ impl Encoder {
         self.manifest.segments.push(segment);
         self.persist()
     }
+    /// Opens the manifest in `dir` (a meeting's media folder) for recovery.
+    pub fn open(dir: impl AsRef<Path>) -> Result<Self, EncoderError> {
+        let manifest_path = dir.as_ref().join("capture-manifest.json");
+        let manifest: Manifest = serde_json::from_slice(&fs::read(&manifest_path)?)
+            .map_err(|e| EncoderError::Manifest(e.to_string()))?;
+        Ok(Self {
+            manifest_path,
+            manifest,
+        })
+    }
+
+    /// Records how the capture was set up, so recovery can line tracks up.
+    pub fn set_session(
+        &mut self,
+        sources: Vec<String>,
+        has_video: bool,
+        audio_offset_seconds: f64,
+        track_leads: Vec<TrackLead>,
+    ) -> Result<(), EncoderError> {
+        self.manifest.sources = sources;
+        self.manifest.has_video = has_video;
+        self.manifest.audio_offset_seconds = audio_offset_seconds;
+        self.manifest.track_leads = track_leads;
+        self.persist()
+    }
+
+    pub fn set_reason(&mut self, reason: Option<String>) -> Result<(), EncoderError> {
+        self.manifest.reason = reason;
+        self.persist()
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.manifest_path.parent().unwrap_or(Path::new("."))
+    }
+
     pub fn mark_state(&mut self, state: impl Into<String>) -> Result<(), EncoderError> {
         self.manifest.state = state.into();
         self.persist()
@@ -137,8 +193,12 @@ impl Encoder {
         for entry in fs::read_dir(root)? {
             let path = entry?.path().join("capture-manifest.json");
             if path.exists() {
-                let manifest: Manifest = serde_json::from_slice(&fs::read(path)?)
-                    .map_err(|e| EncoderError::Manifest(e.to_string()))?;
+                // One unreadable manifest must not hide the others.
+                let Ok(manifest) = fs::read(&path).map_err(|e| e.to_string()).and_then(|b| {
+                    serde_json::from_slice::<Manifest>(&b).map_err(|e| e.to_string())
+                }) else {
+                    continue;
+                };
                 if matches!(
                     manifest.state.as_str(),
                     "recording" | "interrupted" | "recoverable"

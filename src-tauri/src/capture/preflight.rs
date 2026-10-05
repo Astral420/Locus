@@ -43,6 +43,7 @@ mod tests {
             single_person_mic: false,
             title: "Test capture".into(),
             output_root: root.path().join("media"),
+            screen_target: None,
         };
         validate_storage(&options).unwrap();
         assert!(!root.path().join("media/.locus-write-test").exists());

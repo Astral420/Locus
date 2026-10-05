@@ -33,6 +33,60 @@ pub async fn prewarm_capture() -> Result<(), String> {
     .await
 }
 
+/// Captures that were interrupted (crash, forced quit, power loss) and still
+/// have recordable material on disk. The app only offers them; nothing is
+/// restarted or rebuilt until `recover_capture` is called.
+#[tauri::command]
+pub async fn list_recoverable_captures(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::capture::recovery::RecoverableCapture>, String> {
+    let root = state.media_root.clone();
+    let database = state.database.clone();
+    let active = state.capture.state().meeting_id;
+    blocking(move || {
+        Ok(crate::capture::recovery::list_recoverable(
+            &root,
+            active.as_deref(),
+            Some(&database),
+        ))
+    })
+    .await
+}
+
+/// Rebuilds the recording of an interrupted capture from what survived, then
+/// saves it like a normal stop (including queueing processing).
+#[tauri::command]
+pub async fn recover_capture(
+    state: State<'_, AppState>,
+    meeting_id: String,
+) -> Result<crate::capture::recovery::RecoveryOutcome, String> {
+    let root = state.media_root.clone();
+    let database = state.database.clone();
+    let pipeline = state.pipeline.clone();
+    blocking(move || {
+        let ffmpeg = crate::capture::screen::locate_ffmpeg().ok_or_else(|| {
+            "FFmpeg was not found, so the recording cannot be rebuilt.".to_string()
+        })?;
+        let outcome =
+            crate::capture::recovery::recover_and_commit(&database, &root, &meeting_id, &ffmpeg)?;
+        pipeline.enqueue(
+            &meeting_id,
+            crate::pipeline::orchestrator::PipelineMode::Balanced,
+        )?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Displays and windows the native backend can record, for the source picker
+/// (FR1.3). Asking triggers the macOS screen-recording permission prompt the
+/// first time. Fails on platforms without a native backend yet.
+#[tauri::command]
+pub async fn list_screen_sources() -> Result<Vec<crate::capture::source::ScreenSourceInfo>, String>
+{
+    blocking(|| crate::capture::native_screen::list_sources().map_err(|e| e.to_string())).await
+}
+
 #[tauri::command]
 pub async fn start_recording(
     state: State<'_, AppState>,
@@ -40,6 +94,7 @@ pub async fn start_recording(
     meeting_type: MeetingType,
     title: Option<String>,
     single_person_mic: Option<bool>,
+    screen_target: Option<crate::capture::source::ScreenTarget>,
 ) -> Result<RecordingStateDto, String> {
     let capture = state.capture.clone();
     let media_root = state.media_root.clone();
@@ -53,6 +108,7 @@ pub async fn start_recording(
             single_person_mic: single_person_mic.unwrap_or(false),
             title: title.unwrap_or_default(),
             output_root,
+            screen_target,
         };
         preflight::validate_storage(&options).map_err(|e| e.to_string())?;
         #[cfg(target_os = "linux")]

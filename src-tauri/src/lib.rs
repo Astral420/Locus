@@ -68,6 +68,7 @@ pub fn run() {
         pipeline,
         embedding_server: Arc::new(Mutex::new(None)),
     };
+    state.capture.start_watchdog();
     tauri::Builder::default()
         .manage(state)
         .on_window_event(|window, event| {
@@ -87,6 +88,9 @@ pub fn run() {
             commands::greet,
             commands::get_recording_state,
             commands::recording::prewarm_capture,
+            commands::recording::list_screen_sources,
+            commands::recording::list_recoverable_captures,
+            commands::recording::recover_capture,
             commands::recording::start_recording,
             commands::recording::pause_recording,
             commands::recording::resume_recording,
