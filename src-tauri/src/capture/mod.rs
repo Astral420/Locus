@@ -17,6 +17,8 @@ pub mod timeline;
 pub mod video_encoder;
 pub mod video_pipeline;
 pub mod windows;
+#[cfg(target_os = "windows")]
+pub mod windows_wgc;
 
 use crate::{
     contracts::{CaptureLifecycle, CaptureSource, MeetingType, RecordingStateDto},
@@ -936,6 +938,7 @@ mod tests {
             manifest: None,
             registered_segments: 0,
             registered_seconds: 0.0,
+            final_duration: None,
         }
     }
 

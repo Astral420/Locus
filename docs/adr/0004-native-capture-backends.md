@@ -62,3 +62,28 @@ On the next launch, `list_recoverable_captures` offers interrupted captures (it 
 Frontend contract: `list_recoverable_captures` returns `{ meetingId, captureId, sources, hasVideo, videoSegments, audioFiles, estimatedSeconds, reason }[]`; `recover_capture` returns `{ meetingId, relativePath, durationSeconds, hasVideo, audioStreams }`. Deciding when to show the offer is the frontend's.
 
 Not covered, and not verified: forced sleep and power loss (data reaches the OS cache but not necessarily the platter; there is no fsync on audio), network drives, and a screen-source loss on real hardware (the macOS stop callback is untested on a Mac). A discard command for unwanted interrupted captures does not exist yet.
+
+## Windows (NC-6)
+
+Library: `windows-capture` 2.0.1 (MIT, 1.9 million downloads, updated 2026-08-08), a wrapper over Windows Graphics Capture that owns the Direct3D device, frame pool and staging copy. The raw `windows` crate was the alternative; it would mean writing and maintaining all of that ourselves with no Windows machine to test on. Two costs: the crate is Rust edition 2024 (needs Rust 1.85; the repo's declared `rust-version = 1.77` should be raised), and `Frame::buffer()` allocates a staging texture per frame (acceptable at 30 fps; reuse it if profiling says so).
+
+`WinScreenSource` (`capture/windows_wgc.rs`, Windows only) implements the shared `ScreenSource` trait:
+
+- Targets: `Display(n)` is the one-based monitor index; `Window(id)` is the window's `HWND`; primary display by default. `list_screen_sources` returns them with titles.
+- Pixel format: WGC delivers BGRA, so frames go to FFmpeg as BGRA and FFmpeg converts to 4:2:0. That is about 250 MB/s through the pipe at 1080p30. A source larger than 1080p (a 4K display is 1 GB/s of BGRA) is first averaged down in Rust to the fixed output size (`scale_bgra`, area average, sharp on text), so the pipe never carries more than a 1080p frame. GPU-side NV12 conversion is the follow-up if CPU use matters.
+- Cursor and border: the OS defaults. That is the only combination valid on every build from Windows 10 1903; the cursor is recorded and Windows draws its capture border. Removing the border needs Windows 11 and a permission, so it is deliberately not requested.
+- Pause only stops forwarding pictures, as on macOS. The window or display closing ends the stream and the watchdog preserves the take.
+- Preflight rejects Windows builds below 18362 (version 1903) with a clear message when the native backend is selected.
+
+Audio: not changed. System audio already runs through `cpal`'s WASAPI loopback (an input stream on the default output device) and the microphone through its WASAPI input, both timestamped on the shared media clock at the moment of their first buffer. Whether `cpal` meets the sync and latency targets on Windows is **unverified**; move to a direct `windows`-crate WASAPI client only if the checklist below shows drift or excess latency.
+
+Hardware checklist (UNVERIFIED until run on Windows 10 1903+ and Windows 11):
+
+1. `cargo check` and `cargo test --lib` on Windows; then record with `LOCUS_CAPTURE_BACKEND=native`.
+2. Primary display, a second monitor, a window; window resized and closed mid-recording; display unplugged.
+3. First frame time; frame count about 30 x duration; 4K display stays under one frame of CPU per frame.
+4. Pause and resume: no gap, duration excludes the pause.
+5. System audio (loopback) and microphone present and in sync with video within the D7 tolerance over 10 minutes; behaviour when the default output device changes mid-recording.
+6. The yellow capture border on 10 and 11; cursor visible; a protected (DRM) window records black.
+7. Behaviour on a GPU-less or remote-desktop session.
+8. Windows CI runs the shared-layer tests: `cargo test --lib` on a Windows runner needs FFmpeg on `PATH` or `LOCUS_REQUIRE_FFMPEG` unset.

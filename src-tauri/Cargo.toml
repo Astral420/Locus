@@ -30,6 +30,10 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 whisper-rs = { version = "0.16", default-features = false }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows Graphics Capture (NATIVE_CAPTURE_PLAN NC-6): see docs/adr/0004-native-capture-backends.md.
+windows-capture = "2.0.1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 # ScreenCaptureKit video + system audio (NATIVE_CAPTURE_PLAN NC-2/NC-3). macos_13_0

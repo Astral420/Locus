@@ -22,10 +22,14 @@ pub fn platform_source() -> Result<Box<dyn ScreenSource>, CaptureError> {
     {
         Ok(Box::new(super::macos_sck::MacScreenSource::new()))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(super::windows_wgc::WinScreenSource::new()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Err(CaptureError::SourceUnavailable(
-            "Screen: the native capture backend is only implemented on macOS so far; \
+            "Screen: the native capture backend is only implemented on macOS and Windows so far; \
              unset LOCUS_CAPTURE_BACKEND or set it to \"ffmpeg\""
                 .into(),
         ))
@@ -38,10 +42,14 @@ pub fn list_sources() -> Result<Vec<super::source::ScreenSourceInfo>, CaptureErr
     {
         super::macos_sck::list_sources()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        super::windows_wgc::list_sources()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Err(CaptureError::SourceUnavailable(
-            "Choosing a screen or window is only available on macOS so far.".into(),
+            "Choosing a screen or window is only available on macOS and Windows so far.".into(),
         ))
     }
 }
