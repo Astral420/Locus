@@ -2,6 +2,12 @@
 # publishes it to a GitHub Release. Run this when bumping FFmpeg/x264, then paste
 # the manifest lines from the job summary into packaging/ffmpeg/manifest.txt.
 #
+# FFmpeg ENCODES and MUXES only (NATIVE_CAPTURE_PLAN NC-8): screen capture is native
+# (ScreenCaptureKit / Windows Graphics Capture / PipeWire), so no capture device is
+# built by default. The component list below is exactly what the production command
+# lines in src-tauri/src/capture/{video_encoder,container,screen}.rs need; the smoke
+# test runs those command lines, so a missing component fails the job.
+#
 # NOTE: written without access to the runners; the first run will likely need
 # small fixes. Every leg ends with packaging/ffmpeg-smoke.sh, which fails the job
 # if the result is not complete and self-contained.
@@ -12,14 +18,21 @@ on:
       ffmpeg_version: { description: "FFmpeg release tag", default: "7.1.1" }
       x264_ref:       { description: "x264 commit/tag (pin a commit)", default: "stable" }
       revision:       { description: "Locus build revision suffix", default: "1" }
+      capture_devices:
+        description: "Also build avfoundation/gdigrab for the legacy LOCUS_CAPTURE_BACKEND=ffmpeg screen path (plan D3). Native capture is the default on every OS, so leave false unless the ffmpeg override must work in the shipped build."
+        type: boolean
+        default: false
 
 env:
   FFMPEG_VERSION: ${{ inputs.ffmpeg_version }}
   X264_REF: ${{ inputs.x264_ref }}
+  CAPTURE_DEVICES: ${{ inputs.capture_devices }}
   RELEASE_TAG: ffmpeg-${{ inputs.ffmpeg_version }}-${{ inputs.revision }}
 
-# Only what Locus uses: screen input, libx264, aac, mp4/concat, scale/format.
-# GPL because of libx264 (see src-tauri/ffmpeg/README.md for the license gate).
+# Only what Locus uses: libx264, aac, mp4/concat/wav/rawvideo-pipe, scale/format.
+# GPL because of libx264 (decision D1 in the plan is still open: if the encoder
+# changes, change --enable-encoder, the smoke test and THIRD_PARTY_NOTICES.md together;
+# see src-tauri/ffmpeg/README.md for the license gate).
 jobs:
   build:
     strategy:
@@ -69,10 +82,18 @@ jobs:
           tar xf ffmpeg.tar.xz && cd "ffmpeg-${FFMPEG_VERSION}"
           EXTRA=""
           case "${{ runner.os }}" in
-            macOS)   EXTRA="--enable-avfoundation --enable-indev=avfoundation" ;;
-            Windows) EXTRA="--enable-indev=gdigrab" ;;
-            Linux)   EXTRA="--extra-ldflags=-static-libgcc" ;;
+            Linux) EXTRA="--extra-ldflags=-static-libgcc" ;;
           esac
+          # Legacy screen path only (plan D3): FFmpeg-driven capture + its timestamp filter.
+          if [ "$CAPTURE_DEVICES" = "true" ]; then
+            case "${{ runner.os }}" in
+              macOS)   EXTRA="$EXTRA --enable-avfoundation --enable-indev=avfoundation --enable-filter=setpts" ;;
+              Windows) EXTRA="$EXTRA --enable-indev=gdigrab --enable-filter=setpts" ;;
+            esac
+          fi
+          # `hevc` parser: FFmpeg 7.1.1's h2645_sei.c (built for the h264 decoder) calls the
+          # AOM film-grain code that only an HEVC component builds; without it the link fails
+          # (verified locally). It adds HEVC header parsing only, no decoder.
           PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
             --prefix="$PWD/../_out" --pkg-config-flags=--static \
             --extra-cflags="-I$PREFIX/include" --extra-ldflags="-L$PREFIX/lib" \
@@ -80,13 +101,13 @@ jobs:
             --disable-ffplay --disable-ffprobe --disable-shared --enable-static \
             --enable-gpl --enable-libx264 \
             --disable-everything \
-            --enable-encoder=libx264,aac,pcm_s16le \
-            --enable-decoder=h264,aac,pcm_s16le,rawvideo,pcm_f32le \
-            --enable-muxer=mp4,null,wav,segment --enable-demuxer=concat,mov,wav,lavfi \
+            --enable-encoder=libx264,aac,wrapped_avframe,pcm_s16le \
+            --enable-decoder=h264,aac,rawvideo,pcm_s16le \
+            --enable-muxer=mp4,null --enable-demuxer=concat,mov,wav,rawvideo \
             --enable-protocol=file,pipe \
-            --enable-filter=scale,format,fps,setpts,aresample,anull,null,testsrc,sine,nullsrc \
-            --enable-indev=lavfi --enable-parser=h264,aac \
-            --enable-bsf=aac_adtstoasc,h264_mp4toannexb,setts \
+            --enable-filter=scale,format,fps,aresample,aformat,anull,null \
+            --enable-parser=h264,aac,hevc \
+            --enable-bsf=setts,h264_mp4toannexb \
             $EXTRA
           make -j4 && make install
           { echo "FFmpeg ${FFMPEG_VERSION}"; echo "x264 $(cat ../_deps/x264.commit)"; echo; \

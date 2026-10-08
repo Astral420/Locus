@@ -5,7 +5,8 @@ Locus application code is MIT-licensed. The release process must replace each `u
 | Component | Use | License / source evidence | Bundled in release |
 |---|---|---|---|
 | Tauri / wry | Desktop shell | `pnpm-lock.yaml`, Cargo.lock | yes |
-| FFmpeg | MP4 encoding and media processing | exact build recipe required | unverified |
+| FFmpeg 7.1.1 + x264 | MP4 encoding and muxing only (no capture devices) | GPL v2 or later (built with `--enable-gpl --enable-libx264`; also builds the `hevc` parser, parsing only, no HEVC decoder); recipe `.github/workflows/build-ffmpeg.yml`; exact FFmpeg and x264 revisions are in `BUILDINFO.txt` inside each archive. Source for both, plus the recipe, must be offered with the installer. | unverified: no release build has been run |
+| ashpd / pipewire (Rust) | Linux screen portal and PipeWire streams | MIT; `Cargo.lock`. Links the system `libpipewire-0.3` (MIT) | Linux builds |
 | whisper.cpp / whisper-rs | Transcription | exact commit and license required | unverified |
 | pyannote community model | VAD and diarization | exact model revision and model license required | unverified |
 | Tesseract | OCR | exact binary and traineddata notices required | unverified |

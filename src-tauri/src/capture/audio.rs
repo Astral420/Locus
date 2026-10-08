@@ -341,6 +341,67 @@ fn run_screencapturekit_track(
     }
 }
 
+/// Records a PipeWire stream (system audio monitor or microphone) into `path`
+/// (mono, 48 kHz) until told to stop, with the same pause, level and failure
+/// behaviour as the cpal tracks.
+#[cfg(target_os = "linux")]
+fn run_pipewire_track(
+    source: &CaptureSource,
+    path: &Path,
+    level: Arc<AtomicU32>,
+    health: Arc<TrackHealth>,
+    paused: Arc<AtomicBool>,
+    ready: mpsc::SyncSender<Result<Instant, String>>,
+    stop: mpsc::Receiver<()>,
+) {
+    use super::linux_audio::{AudioKind, PipeWireAudioStream};
+    let kind = if *source == CaptureSource::Microphone {
+        AudioKind::Microphone
+    } else {
+        AudioKind::System
+    };
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: super::linux::AUDIO_RATE,
+        bits_per_sample: 16,
+        sample_format: WavFormat::Int,
+    };
+    let writer = match WavWriter::create(path, spec) {
+        Ok(writer) => writer,
+        Err(e) => {
+            let _ = ready.send(Err(format!("cannot create recording file: {e}")));
+            return;
+        }
+    };
+    let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
+    let sink = Sink {
+        writer: Arc::clone(&writer),
+        level,
+        paused,
+        health: Arc::clone(&health),
+    };
+    let failure_health = Arc::clone(&health);
+    match PipeWireAudioStream::start(
+        kind,
+        move |samples| sink.push(samples),
+        move |message| failure_health.fail(message),
+    ) {
+        Err(message) => {
+            let _ = ready.send(Err(message));
+        }
+        Ok((stream, started_at)) => {
+            let _ = ready.send(Ok(started_at));
+            let _ = stop.recv(); // until stop (or the sender is dropped)
+            drop(stream);
+            if let Ok(mut guard) = writer.lock() {
+                if let Some(writer) = guard.take() {
+                    let _ = writer.finalize();
+                }
+            }
+        }
+    }
+}
+
 /// Test hook: an audio capture whose only track has already reported a write
 /// failure, with one second of real audio on disk (what a full disk leaves).
 #[cfg(test)]
@@ -523,6 +584,21 @@ impl AudioCapture {
                     && super::macos::native_audio_selected()
                 {
                     run_screencapturekit_track(
+                        &thread_path,
+                        thread_level,
+                        thread_health,
+                        paused,
+                        ready_tx,
+                        stop_rx,
+                    );
+                    return;
+                }
+                // Linux native backend: system audio and the microphone from
+                // PipeWire streams (NFR12a) instead of cpal's ALSA host.
+                #[cfg(target_os = "linux")]
+                if super::linux::native_audio_selected() {
+                    run_pipewire_track(
+                        &thread_source,
                         &thread_path,
                         thread_level,
                         thread_health,

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Offline-first meeting library"
 authors = ["Locus contributors"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.87"
 
 [lib]
 name = "locus_lib"
@@ -33,6 +33,14 @@ whisper-rs = { version = "0.16", default-features = false }
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows Graphics Capture (NATIVE_CAPTURE_PLAN NC-6): see docs/adr/0004-native-capture-backends.md.
 windows-capture = "2.0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# xdg-desktop-portal ScreenCast session and PipeWire streams (NATIVE_CAPTURE_PLAN NC-7):
+# see docs/adr/0004-native-capture-backends.md. ashpd runs on async-io, whose
+# block_on is already in the lockfile, so no second async runtime is pulled in.
+ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "screencast"] }
+async-io = "2"
+pipewire = "0.10.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

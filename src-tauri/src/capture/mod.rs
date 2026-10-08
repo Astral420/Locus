@@ -4,6 +4,10 @@ pub mod container;
 pub mod encoder;
 pub mod frame;
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod linux_audio;
+#[cfg(target_os = "linux")]
+pub mod linux_pipewire;
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub mod macos_sck;
@@ -33,9 +37,11 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Which implementation records the screen. `LOCUS_CAPTURE_BACKEND` selects it;
-/// `ffmpeg` (the interim FFmpeg-driven capture) stays the default until a
-/// native backend is proven on each platform (NATIVE_CAPTURE_PLAN NC-0).
+/// Which implementation captures the screen (and, on macOS and Linux, the audio
+/// path). Each OS defaults to its native API (`platform_default`); FFmpeg then
+/// only encodes. `LOCUS_CAPTURE_BACKEND=ffmpeg` forces the legacy FFmpeg-driven
+/// screen capture, which needs an FFmpeg built with capture devices
+/// (NATIVE_CAPTURE_PLAN NC-0, D3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureBackend {
     Ffmpeg,
@@ -45,10 +51,28 @@ pub enum CaptureBackend {
 impl CaptureBackend {
     pub const ENV_VAR: &'static str = "LOCUS_CAPTURE_BACKEND";
 
-    /// Parses a switch value. Unset or empty means the default (`ffmpeg`).
+    /// What this OS uses when `LOCUS_CAPTURE_BACKEND` is not set: the native
+    /// capture API on every platform that has one (ScreenCaptureKit on macOS,
+    /// Windows Graphics Capture on Windows, the PipeWire portal on Linux).
+    /// FFmpeg then only encodes. Any other OS has no native adapter.
+    pub const fn platform_default() -> Self {
+        if cfg!(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux"
+        )) {
+            Self::Native
+        } else {
+            Self::Ffmpeg
+        }
+    }
+
+    /// Parses a switch value. Unset or empty means the platform default;
+    /// `ffmpeg` forces the legacy FFmpeg-driven screen capture.
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
         match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-            None | Some("") | Some("ffmpeg") => Ok(Self::Ffmpeg),
+            None | Some("") => Ok(Self::platform_default()),
+            Some("ffmpeg") => Ok(Self::Ffmpeg),
             Some("native") => Ok(Self::Native),
             Some(other) => Err(format!(
                 "unknown {} value \"{other}\" (expected \"ffmpeg\" or \"native\")",
@@ -846,9 +870,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capture_backend_defaults_to_ffmpeg() {
-        assert_eq!(CaptureBackend::parse(None), Ok(CaptureBackend::Ffmpeg));
-        assert_eq!(CaptureBackend::parse(Some("")), Ok(CaptureBackend::Ffmpeg));
+    fn capture_backend_defaults_to_the_native_api_on_every_supported_os() {
+        let expected = if cfg!(any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux"
+        )) {
+            CaptureBackend::Native
+        } else {
+            CaptureBackend::Ffmpeg
+        };
+        assert_eq!(CaptureBackend::platform_default(), expected);
+        assert_eq!(CaptureBackend::parse(None), Ok(expected));
+        assert_eq!(CaptureBackend::parse(Some("")), Ok(expected));
+    }
+
+    #[test]
+    fn capture_backend_ffmpeg_is_an_explicit_override() {
         assert_eq!(
             CaptureBackend::parse(Some(" FFmpeg ")),
             Ok(CaptureBackend::Ffmpeg)

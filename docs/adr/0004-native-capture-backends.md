@@ -1,6 +1,6 @@
 # Native capture backends
 
-Screen and system-audio capture move from a FFmpeg-driven device capture (about 2 s to the first frame, timestamps reconciled after the fact) to the operating system's own capture APIs feeding one shared media clock, with FFmpeg only encoding. macOS comes first through ScreenCaptureKit (NC-2 video, NC-3 system audio); Windows Graphics Capture and Linux PipeWire follow. The native path is selected with `LOCUS_CAPTURE_BACKEND=native`; the FFmpeg path stays the default and the fallback until each platform is proven on hardware.
+Screen and system-audio capture move from a FFmpeg-driven device capture (about 2 s to the first frame, timestamps reconciled after the fact) to the operating system's own capture APIs feeding one shared media clock, with FFmpeg only encoding. macOS comes first through ScreenCaptureKit (NC-2 video, NC-3 system audio); Windows Graphics Capture and Linux PipeWire follow. Each OS now defaults to its native path (`CaptureBackend::platform_default`: ScreenCaptureKit on macOS, Windows Graphics Capture on Windows, the PipeWire portal on Linux), with FFmpeg only encoding. `LOCUS_CAPTURE_BACKEND=ffmpeg` is an explicit override that forces the legacy FFmpeg-driven screen capture; `native` is accepted and means the same as the default. Hardware proof per platform is still outstanding (see each checklist).
 
 ## macOS library choice
 
@@ -33,7 +33,7 @@ Logic that needs no OS (size capping, plane packing, audio downmix, permission w
 
 ## Hardware checklist (UNVERIFIED until run on a Mac)
 
-Written without a Mac to compile or run on. First `cargo check` and `cargo test --lib` on macOS, then with `LOCUS_CAPTURE_BACKEND=native`:
+Written without a Mac to compile or run on. First `cargo check` and `cargo test --lib` on macOS, then record with the default (native) backend:
 
 1. Permission: fresh install shows the prompt; deny gives the actionable error and no phantom "recording".
 2. 30 s of screen: first frame well under 2 s (proposed target 500 ms); MP4 plays; frame count about 30 x duration.
@@ -79,7 +79,7 @@ Audio: not changed. System audio already runs through `cpal`'s WASAPI loopback (
 
 Hardware checklist (UNVERIFIED until run on Windows 10 1903+ and Windows 11):
 
-1. `cargo check` and `cargo test --lib` on Windows; then record with `LOCUS_CAPTURE_BACKEND=native`.
+1. `cargo check` and `cargo test --lib` on Windows; then record with the default (native) backend.
 2. Primary display, a second monitor, a window; window resized and closed mid-recording; display unplugged.
 3. First frame time; frame count about 30 x duration; 4K display stays under one frame of CPU per frame.
 4. Pause and resume: no gap, duration excludes the pause.
@@ -87,3 +87,50 @@ Hardware checklist (UNVERIFIED until run on Windows 10 1903+ and Windows 11):
 6. The yellow capture border on 10 and 11; cursor visible; a protected (DRM) window records black.
 7. Behaviour on a GPU-less or remote-desktop session.
 8. Windows CI runs the shared-layer tests: `cargo test --lib` on a Windows runner needs FFmpeg on `PATH` or `LOCUS_REQUIRE_FFMPEG` unset.
+
+## Linux (NC-7)
+
+Libraries: `ashpd` 0.13 (MIT) for the xdg-desktop-portal ScreenCast session and `pipewire` 0.10 (MIT, links the system `libpipewire-0.3`). `ashpd` runs on `async-io` (already in the lockfile) so no second async runtime is added; `ashpd` needs Rust 1.87, so `rust-version` is raised to 1.87. The CI Linux job already installs `libpipewire-0.3-dev`; building against the 0.3.48 shipped by Ubuntu 22.04 is **unverified**.
+
+`LinuxScreenSource` (`capture/linux_pipewire.rs`, Linux only) implements the shared `ScreenSource` trait:
+
+- Wayland does not let an app enumerate screens or windows. `list_screen_sources` returns one entry, "Screen or window (choose in the system dialog)"; the compositor's own chooser appears when recording starts. A `Display` target narrows the dialog to monitors, a `Window` target to windows; their ids are not used.
+- No restore token is kept, so the dialog appears on every recording and a recording never starts on a screen the person did not just choose. Persisting a token needs a place to store it; follow-up if the repeated prompt is a problem.
+- Buffers: only shared-memory 32-bit RGB (`BGRx`, `BGRA`, `RGBx`, `RGBA`) is offered, no DMA-BUF modifiers, so frames are read directly and reach FFmpeg as BGRA (RGB-order sources are swapped in Rust). Sources above 1080p are area-averaged down in Rust (`scale_bgra`), as on Windows; the output size is fixed from the first negotiated size.
+- Cursor: embedded in the picture when the portal supports it.
+- Pause only stops forwarding pictures. The share ending (stopped from the desktop, window closed, PipeWire gone) leaves the streaming state and `failure()` reports it so the watchdog preserves the take. No picture within 10 s of connecting is reported as an error (some compositors send only on damage).
+- Preflight (native or not): X11 sessions are rejected; PipeWire must be reachable (a real connection, not `pw-cli`); the ScreenCast portal is checked only when the screen is a selected source.
+
+Audio (`capture/linux_audio.rs`), decision D5 taken as the plan recommends: with the native backend (the default on Linux) system audio is a PipeWire capture stream on the default output's monitor (`stream.capture.sink`) and the microphone is the default input, both requested as mono F32 at 48 kHz so PipeWire's adapter does the conversion. They feed the same WAV writer, meter, pause and failure handling as the `cpal` tracks; the first buffer's arrival minus its length is the start time. With the `ffmpeg` override audio still goes through `cpal`. If D5 is decided the other way, `audio.rs` selects `cpal` again by dropping one branch.
+
+Audio starts while the portal dialog is open, so it leads the video; the existing offset trim in the mux handles that, at the cost of recording the seconds spent in the dialog and discarding them.
+
+Tested without a desktop: `linux_audio.rs` and `linux_pipewire.rs` have tests, run only with `LOCUS_PIPEWIRE_DAEMON_TEST=1`, against a headless PipeWire + WirePlumber with null devices (`pipewire`, `wireplumber`, a session D-Bus, `pw-cli create-node ... support.null-audio-sink` for a sink and a virtual source, GStreamer `pipewiresink` as a stand-in compositor). They prove the stream code: a tone played to the default output is heard, the microphone stream delivers buffers and stops cleanly, a red picture arrives as BGRA for both BGRx and RGBx sources, a 2560x1440 source is scaled to 1920x1080, pause and resume gate frames, and a vanished source is reported. They do not exercise the portal dialog, a real compositor, or real devices. The video stream is connected with `DONT_RECONNECT`; without it a vanished source left the stream paused and unreported.
+
+Hardware checklist (UNVERIFIED until run on a Wayland desktop):
+
+1. GNOME (mutter), KDE (KWin) and a wlroots compositor with `xdg-desktop-portal-wlr`: dialog appears, monitor and window both work, cancel gives a clear error.
+2. First frame time; frame count about 30 x duration; a static screen on wlroots still sends a first picture within 10 s.
+3. Window resized and closed mid-recording; "stop sharing" from the desktop ends the take and keeps it.
+4. System audio from a browser and a game; microphone; default output changed mid-recording; headphones unplugged.
+5. "Stop sharing" from the desktop ends the take through the portal path (only the PipeWire-node-removal route is tested; a watcher on the portal session's `Closed` signal is not implemented). A/V sync within the D7 tolerance over 10 minutes; first-buffer start time on a silent system (the audio start uses the first buffer; if a silent graph delivers none, the stream's "streaming" time is used after 5 s).
+6. A 4K display; fractional scaling; a rotated monitor (stride and size come from the negotiated format).
+7. Ubuntu 22.04 (PipeWire 0.3.48) and a current distribution.
+8. Sandboxed (Flatpak/Snap) runs: the portal is the only route, but the PipeWire socket path differs.
+
+## Bundled FFmpeg (NC-8)
+
+FFmpeg no longer captures anything in the native design, so the bundled build (`.github/workflows/build-ffmpeg.yml`) drops `avfoundation`, `gdigrab`, `lavfi` and the test sources. The component list is what the production command lines need, and it was checked by building FFmpeg 7.1.1 with exactly these flags and running `packaging/ffmpeg-smoke.sh` against the result (the workflow itself has not run on a CI runner):
+
+- encoders `libx264`, `aac`, plus `wrapped_avframe` and `pcm_s16le` (the `null` muxer used by the full-decode verification needs both);
+- decoders `h264`, `aac`, `rawvideo`, `pcm_s16le`;
+- demuxers `rawvideo` (frames on a pipe), `mov`, `concat`, `wav`; muxers `mp4`, `null`; protocols `file`, `pipe`;
+- filters `scale`, `format`, `fps`, `aresample`, `aformat`, `anull`, `null`;
+- parsers `h264`, `aac`, and `hevc`: FFmpeg 7.1.1's `h2645_sei.c`, built for the H.264 decoder, calls AOM film-grain code that only an HEVC component builds, so an H.264-only build fails to link without it (HEVC header parsing only, no decoder);
+- bitstream filters `setts` (segment re-time) and `h264_mp4toannexb` (the concat demuxer refuses H.264 without it).
+
+The list is sufficient, not proven minimal: items were added when a smoke command failed, never removed one by one. The smoke test feeds raw NV12 and BGRA frames on a pipe, re-times the segment, concatenates two segments with three AAC streams (positive and negative audio offsets), builds an audio-only file, and fully decodes each result.
+
+Because native capture is now the default on every supported OS, a default build needs no capture device. The workflow keeps a `capture_devices` input (default off) that adds `avfoundation`/`gdigrab` back; build with it only while the `LOCUS_CAPTURE_BACKEND=ffmpeg` override must work in a shipped build (plan D3). On Linux the override has never been able to record the screen.
+
+The encoder is `libx264` (GPL; decision D1 confirmed). If it ever changes, `--enable-encoder`, the smoke test and `THIRD_PARTY_NOTICES.md` change together.
