@@ -49,8 +49,8 @@ describe("M6.01: Design System & Tokens (Editorial Botanical)", () => {
     expect(greenTextContrast).toBeGreaterThan(6.0);   // 6.2:1 target
     expect(greenTextContrast).toBeGreaterThan(4.5);  // Passes WCAG AA
 
-    // Dark Obsidian Slate #111614 (17, 22, 20) vs Crisp off-white Ink #F0F3F1 (240, 243, 241)
-    const darkSlateContrast = getContrast([17, 22, 20], [240, 243, 241]);
+    // Neutral Graphite ground #121212 (18, 18, 18) vs off-white Ink #EDEDED (237, 237, 237)
+    const darkSlateContrast = getContrast([18, 18, 18], [237, 237, 237]);
     expect(darkSlateContrast).toBeGreaterThan(14.0);  // 14.5:1 target
   });
 
@@ -81,12 +81,14 @@ describe("M6.02: App Shell & Sidebar Specifications", () => {
   });
 
   it("exposes active background download progress in uiStore", () => {
+    // No fake download is seeded any more: the store starts idle.
     const { downloadStatus, setDownloadStatus } = useUiStore.getState();
-    expect(downloadStatus.active).toBe(true);
-    expect(downloadStatus.progress).toBe(45);
+    expect(downloadStatus.active).toBe(false);
+    expect(downloadStatus.progress).toBe(0);
 
-    setDownloadStatus({ progress: 80 });
+    setDownloadStatus({ active: true, modelName: "Test Model", progress: 80 });
     expect(useUiStore.getState().downloadStatus.progress).toBe(80);
+    setDownloadStatus({ active: false, modelName: "", progress: 0 });
   });
 });
 

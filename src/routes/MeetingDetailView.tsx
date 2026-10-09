@@ -1,3 +1,5 @@
+import { useUiStore } from "../stores/uiStore";
+import { hiddenSidebarInset } from "../lib/platform";
 import React, { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -52,6 +54,7 @@ import {
 } from "lucide-react";
 
 export const MeetingDetailContent: React.FC = () => {
+  const sidebarHidden = useUiStore((s) => s.sidebarCollapsed);
   const params = useParams({ strict: false }) as { id?: string };
   const meetingId = params.id || "m-01";
   const navigate = useNavigate();
@@ -220,13 +223,13 @@ export const MeetingDetailContent: React.FC = () => {
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-bg">
       {/* Precision Master Control Studio Header Bar (DESIGN.md §4.2) */}
-      <div className="border-b border-border/80 bg-surface/40 px-6 py-3">
+      <div className={`px-6 pt-1 pb-3 ${hiddenSidebarInset(sidebarHidden)}`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <button
               type="button"
               onClick={() => void navigate({ to: "/" })}
-              className="p-1 rounded text-ink-muted hover:text-ink hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="p-1.5 rounded-full text-ink-muted hover:text-ink hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               aria-label="Back to meeting library"
             >
               <ChevronLeft className="w-5 h-5" />
@@ -295,9 +298,9 @@ export const MeetingDetailContent: React.FC = () => {
       </div>
 
       {/* Main Split View: Media Player & Slide Strip (Left) | Tabs Studio (Right) */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-0 overflow-hidden">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 px-6 pb-6 overflow-hidden">
         {/* Left Column (5/12 cols): Video Player + Auto-extracted Slides Strip */}
-        <div className="lg:col-span-6 xl:col-span-5 p-5 border-r border-border/80 flex flex-col gap-4 overflow-y-auto bg-surface/10">
+        <div className="lg:col-span-6 xl:col-span-5 p-4 rounded-2xl bg-surface flex flex-col gap-4 overflow-y-auto">
           {/* Synchronized Media Player (Task M8.01) */}
           <MediaPlayer
             src={media?.path ?? undefined}
@@ -320,15 +323,15 @@ export const MeetingDetailContent: React.FC = () => {
         </div>
 
         {/* Right Column (7/12 cols): Tabbed Studio Workspace */}
-        <div className="lg:col-span-6 xl:col-span-7 flex flex-col min-h-0 bg-surface-elevated">
+        <div className="lg:col-span-6 xl:col-span-7 flex flex-col min-h-0 rounded-2xl bg-surface">
           {/* Tab Navigation Header (DESIGN.md §4.2) */}
-          <div className="h-11 border-b border-border flex items-center px-4 gap-1 bg-surface/30 shrink-0">
+          <div className="h-14 flex items-center px-4 gap-1 shrink-0 overflow-x-auto">
             <button
               type="button"
               onClick={() => setActiveTab("summary")}
-              className={`h-8 px-3 rounded text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              className={`h-8 px-3 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 activeTab === "summary"
-                  ? "bg-surface-elevated text-ink font-semibold shadow-xs border border-border"
+                  ? "bg-surface-hover text-ink font-semibold"
                   : "text-ink-muted hover:text-ink"
               }`}
             >
@@ -339,9 +342,9 @@ export const MeetingDetailContent: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveTab("transcript")}
-              className={`h-8 px-3 rounded text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              className={`h-8 px-3 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 activeTab === "transcript"
-                  ? "bg-surface-elevated text-ink font-semibold shadow-xs border border-border"
+                  ? "bg-surface-hover text-ink font-semibold"
                   : "text-ink-muted hover:text-ink"
               }`}
             >
@@ -352,16 +355,16 @@ export const MeetingDetailContent: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveTab("actions")}
-              className={`h-8 px-3 rounded text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              className={`h-8 px-3 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 activeTab === "actions"
-                  ? "bg-surface-elevated text-ink font-semibold shadow-xs border border-border"
+                  ? "bg-surface-hover text-ink font-semibold"
                   : "text-ink-muted hover:text-ink"
               }`}
             >
               <CheckSquare className="w-3.5 h-3.5" />
               <span>Action Items</span>
               {pendingActionsCount > 0 && (
-                <span className="ml-1 px-1.5 py-0.2 rounded-full bg-primary text-white text-[10px] font-mono font-bold">
+                <span className="ml-1 px-1.5 py-0.2 rounded-full bg-primary text-on-primary text-[10px] font-mono font-bold">
                   {pendingActionsCount}
                 </span>
               )}
@@ -370,9 +373,9 @@ export const MeetingDetailContent: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveTab("slides")}
-              className={`h-8 px-3 rounded text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              className={`h-8 px-3 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 activeTab === "slides"
-                  ? "bg-surface-elevated text-ink font-semibold shadow-xs border border-border"
+                  ? "bg-surface-hover text-ink font-semibold"
                   : "text-ink-muted hover:text-ink"
               }`}
             >
@@ -386,9 +389,9 @@ export const MeetingDetailContent: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveTab("chat")}
-              className={`h-8 px-3 rounded text-xs font-medium flex items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              className={`h-8 px-3 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 activeTab === "chat"
-                  ? "bg-surface-elevated text-ink font-semibold shadow-xs border border-border"
+                  ? "bg-surface-hover text-ink font-semibold"
                   : "text-ink-muted hover:text-ink"
               }`}
             >
@@ -452,7 +455,7 @@ export const MeetingDetailContent: React.FC = () => {
             {/* TAB: IN-MEETING CHAT DRAWER */}
             {activeTab === "chat" && (
               <div className="flex flex-col h-full space-y-4" role="region" aria-label="In-meeting scoped Q&A">
-                <div className="p-2.5 rounded bg-green-tint/50 border border-green-text/20 text-xs text-green-text flex items-center justify-between">
+                <div className="p-3 rounded-xl bg-green-tint/60 text-xs text-green-text flex items-center justify-between">
                   <span>Scoped strictly to this meeting’s transcript, slides, and summary.</span>
                   <span className="font-mono text-[10px]">Llama 3.2 3B · Local (Private)</span>
                 </div>
@@ -460,7 +463,7 @@ export const MeetingDetailContent: React.FC = () => {
                 {chatError && <p role="alert" className="text-xs text-status-error">{chatError}</p>}
                 <div className="flex-1 space-y-3 overflow-y-auto pr-1">
                   {chatMessages.map((msg) => (
-                    <div key={msg.id} className={"p-3 rounded-lg text-xs leading-relaxed max-w-[85%] " + (msg.role === "user" ? "ml-auto bg-primary text-white font-medium shadow-xs" : "mr-auto bg-surface-sunken border border-border text-ink")}>
+                    <div key={msg.id} className={"p-3 rounded-2xl text-xs leading-relaxed max-w-[85%] " + (msg.role === "user" ? "ml-auto bg-primary text-on-primary font-medium" : "mr-auto bg-bg text-ink")}>
                       <p className="whitespace-pre-wrap">{msg.content}</p>
                       {msg.citations.map((citation) => (
                         <button key={citation.id} type="button" onClick={() => citation.start_seconds !== null && handleSeek(citation.start_seconds)} className="block mt-1.5 text-[10px] font-mono text-primary border-t border-border/40 pt-1 hover:underline">
@@ -471,13 +474,13 @@ export const MeetingDetailContent: React.FC = () => {
                   ))}
                 </div>
 
-                <form onSubmit={handleSendChat} className="flex items-center gap-2 pt-2 border-t border-border">
+                <form onSubmit={handleSendChat} className="flex items-center gap-2 pt-2">
                   <input
                     type="text"
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
                     placeholder="Ask about this meeting…"
-                    className="flex-1 h-9 px-3 rounded border border-border bg-surface-elevated text-xs text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    className="flex-1 h-10 px-4 rounded-full bg-bg text-xs text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                   />
                   <Button variant="primary" size="sm" type="submit" disabled={chatSending}>
                     <Send className="w-3.5 h-3.5 mr-1" />

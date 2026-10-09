@@ -5,6 +5,7 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   size?: "sm" | "md";
 }
 
+/** Soft rounded-rectangle badge (Jan's "Fits" / tag chips): tinted fill, no border. */
 export const Badge: React.FC<BadgeProps> = ({
   variant = "neutral",
   size = "md",
@@ -12,14 +13,14 @@ export const Badge: React.FC<BadgeProps> = ({
   children,
   ...props
 }) => {
-  const baseStyles = "inline-flex items-center font-medium rounded-full tabular-nums";
+  const baseStyles = "inline-flex items-center font-medium rounded-md nums-tabular";
 
   const variantStyles = {
-    green: "bg-green-tint text-green-text border border-green-text/20",
-    blue: "bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800",
-    amber: "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800",
-    red: "bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800",
-    neutral: "bg-surface-sunken text-ink-muted border border-border",
+    green: "bg-green-tint text-green-text",
+    blue: "bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300",
+    amber: "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300",
+    red: "bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-300",
+    neutral: "bg-surface-hover text-ink-muted",
   }[variant];
 
   const sizeStyles = {

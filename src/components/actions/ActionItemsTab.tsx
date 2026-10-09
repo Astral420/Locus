@@ -40,7 +40,7 @@ export const ActionItemsTab: React.FC<ActionItemsTabProps> = ({
   return (
     <div className="space-y-4 max-w-2xl" role="region" aria-label="Revision Action Items">
       {/* Header Info */}
-      <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-surface/30 text-xs">
+      <div className="flex items-center justify-between p-3 rounded-xl bg-bg text-xs">
         <div className="flex items-center gap-2">
           <CheckSquare className="w-4 h-4 text-primary" />
           <span className="font-semibold text-ink">Action Items</span>
@@ -48,10 +48,10 @@ export const ActionItemsTab: React.FC<ActionItemsTabProps> = ({
         </div>
 
         <div className="flex items-center gap-2 text-ink-muted font-mono text-[11px]">
-          <span className="px-2 py-0.5 rounded bg-surface border border-border">
+          <span className="px-2 py-0.5 rounded-md bg-surface-hover">
             {pendingCount} Pending
           </span>
-          <span className="px-2 py-0.5 rounded bg-surface border border-border">
+          <span className="px-2 py-0.5 rounded-md bg-surface-hover">
             {completedCount} Completed
           </span>
         </div>
@@ -135,7 +135,7 @@ export const ActionItemsTab: React.FC<ActionItemsTabProps> = ({
 
                     {/* Deadline Pill */}
                     {item.deadline ? (
-                      <span className="inline-flex items-center gap-1 font-mono text-[11px] text-ink-muted bg-surface px-2 py-0.5 rounded border border-border">
+                      <span className="inline-flex items-center gap-1 font-mono text-[11px] text-ink-muted bg-surface-hover px-2 py-0.5 rounded-md">
                         <Calendar className="w-2.5 h-2.5" />
                         <span>Due: {item.deadline}</span>
                       </span>

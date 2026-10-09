@@ -51,7 +51,7 @@ export const renderWithCitations = (
         key={`${start}-${end}`}
         type="button"
         onClick={() => onSeek(totalSeconds)}
-        className="inline-flex items-center mx-1 px-1.5 py-0.2 rounded bg-green-tint text-green-text font-mono text-[11px] font-semibold hover:bg-primary hover:text-white transition-colors cursor-pointer border border-primary/20 align-baseline"
+        className="inline-flex items-center mx-1 px-1.5 py-0.2 rounded bg-green-tint text-green-text font-mono text-[11px] font-semibold hover:bg-primary hover:text-on-primary transition-colors cursor-pointer border border-primary/20 align-baseline"
         title={`Seek to ${citationLabel}`}
         aria-label={`Jump to citation ${citationLabel}`}
       >
@@ -104,7 +104,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
   return (
     <div className="space-y-6 max-w-3xl pb-8" role="region" aria-label="Meeting AI Summary">
       {/* Revision Bar & Provenance Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg border border-border bg-surface/40">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3 rounded-xl bg-bg">
         <div className="flex items-center gap-2.5">
           <History className="w-4 h-4 text-ink-muted shrink-0" />
           <div className="flex items-center gap-2">
@@ -118,7 +118,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
                 const target = revisions.find((r) => r.id === e.target.value);
                 if (target) onSelectRevision(target);
               }}
-              className="h-8 px-2.5 rounded border border-border bg-surface-elevated text-xs font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="h-8 px-3 rounded-full border border-border bg-surface-hover text-xs font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               aria-label="Select summary revision"
             >
               {revisions.map((rev) => (
@@ -131,8 +131,8 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-ink-muted font-mono">
-          <span className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-muted font-mono">
+          <span className="flex items-center gap-1 whitespace-nowrap">
             <Sparkles className="w-3.5 h-3.5 text-primary" />
             <span>Model: {summary.model}</span>
           </span>
@@ -145,7 +145,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
       {showOutdatedBanner && (
         <div
           role="alert"
-          className="p-3.5 rounded-lg border border-status-warning/40 bg-amber-50/60 dark:bg-amber-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+          className="p-3.5 rounded-xl bg-status-warning/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
         >
           <div className="flex items-start sm:items-center gap-2.5 text-amber-900 dark:text-amber-200">
             <AlertTriangle className="w-4 h-4 text-status-warning shrink-0 mt-0.5 sm:mt-0" />
@@ -161,7 +161,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
             <button
               type="button"
               onClick={() => setIsOutdatedDismissed(true)}
-              className="px-2.5 py-1 rounded text-ink-muted hover:text-ink hover:bg-surface text-xs transition-colors"
+              className="px-3 py-1 rounded-full text-ink-muted hover:text-ink hover:bg-surface-hover text-xs transition-colors"
             >
               Keep Current
             </button>
@@ -183,7 +183,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
         <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-muted flex items-center gap-1.5">
           <span>Executive Overview</span>
         </h2>
-        <div className="text-sm text-ink leading-relaxed font-normal bg-surface/20 p-4 rounded-lg border border-border/60">
+        <div className="text-sm text-ink leading-relaxed font-normal bg-bg p-4 rounded-xl">
           <p>{renderWithCitations(summary.overview, onSeek)}</p>
         </div>
       </section>
@@ -197,7 +197,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
           {summary.decisions.map((decision, idx) => (
             <div
               key={idx}
-              className="p-3 rounded-lg border border-border/80 bg-surface-elevated hover:bg-surface/50 transition-colors flex items-start gap-2.5"
+              className="p-3 rounded-xl bg-bg hover:bg-surface-hover transition-colors flex items-start gap-2.5"
             >
               <CheckCircle2 className="w-4 h-4 text-primary shrink-0 mt-0.5" />
               <div className="text-sm text-ink leading-relaxed flex-1">
@@ -217,7 +217,7 @@ export const SummaryTab: React.FC<SummaryTabProps> = ({
           {summary.key_concepts.map((concept, idx) => (
             <span
               key={idx}
-              className="px-3 py-1.5 rounded-md bg-surface text-ink text-xs font-medium border border-border hover:border-primary/40 transition-colors"
+              className="px-3.5 py-1.5 rounded-full bg-bg text-ink text-xs font-medium hover:bg-surface-hover transition-colors"
             >
               {concept}
             </span>

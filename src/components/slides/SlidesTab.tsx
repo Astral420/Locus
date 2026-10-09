@@ -32,9 +32,9 @@ export const SlidesTab: React.FC<SlidesTabProps> = ({
       <div
         role="region"
         aria-label="Presentation Slides"
-        className="flex flex-col items-center justify-center py-16 px-4 text-center border border-dashed border-border rounded-lg bg-surface/20"
+        className="flex flex-col items-center justify-center py-16 px-4 text-center rounded-xl bg-bg"
       >
-        <div className="w-12 h-12 rounded-full bg-surface-sunken flex items-center justify-center text-ink-muted mb-3">
+        <div className="w-12 h-12 rounded-full bg-surface-hover flex items-center justify-center text-ink-muted mb-3">
           <Images className="w-6 h-6" />
         </div>
         <h3 className="text-sm font-semibold text-ink">No presentation slides in this recording</h3>
@@ -57,7 +57,7 @@ export const SlidesTab: React.FC<SlidesTabProps> = ({
       {ocrError && (
         <div
           role="alert"
-          className="p-3 rounded-lg border border-status-error/30 bg-red-50/50 dark:bg-red-950/20 flex items-center justify-between text-xs text-red-900 dark:text-red-200"
+          className="p-3 rounded-xl bg-status-error/10 flex items-center justify-between text-xs text-red-900 dark:text-red-200"
         >
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-status-error shrink-0" />
@@ -162,7 +162,7 @@ export const SlidesTab: React.FC<SlidesTabProps> = ({
               </div>
 
               {/* OCR Text Box */}
-              <p className="text-xs text-ink-muted font-mono leading-relaxed bg-surface p-2.5 rounded border border-border/60 line-clamp-3">
+              <p className="text-xs text-ink-muted font-mono leading-relaxed bg-bg p-2.5 rounded-lg line-clamp-3">
                 {slide.ocr_text}
               </p>
             </div>

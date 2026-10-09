@@ -9,7 +9,7 @@ export const Skeleton: React.FC<SkeletonProps> = ({ className = "", ...props }) 
     <div
       role="status"
       aria-busy="true"
-      className={`animate-pulse bg-border/40 rounded ${className}`}
+      className={`animate-pulse bg-surface-hover rounded-lg ${className}`}
       {...props}
     >
       <span className="sr-only">Loading content…</span>

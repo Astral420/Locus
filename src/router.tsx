@@ -49,7 +49,7 @@ const settingsRoute = createRoute({
   component: SettingsView,
 });
 
-const routeTree = rootRoute.addChildren([
+export const routeTree = rootRoute.addChildren([
   indexRoute,
   recordRoute,
   meetingDetailRoute,

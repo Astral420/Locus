@@ -133,7 +133,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   return (
     <div className="relative flex flex-col h-full min-h-0">
       {/* Transcript Toolbar: Search & Filter */}
-      <div className="p-3 border-b border-border flex items-center justify-between gap-3 bg-surface/30">
+      <div className="pb-3 flex items-center justify-between gap-3">
         <div className="relative flex-1 max-w-sm">
           <Search className="w-3.5 h-3.5 text-ink-muted absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
@@ -141,7 +141,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
             placeholder="Search transcript text or speaker… (J/K to step)"
-            className="w-full h-8 pl-8 pr-2.5 rounded border border-border bg-surface-elevated text-xs text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="w-full h-8 pl-8 pr-2.5 rounded-full bg-bg text-xs text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             aria-label="Filter transcript"
           />
         </div>
@@ -156,7 +156,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
         <button
           type="button"
           onClick={handleJumpToCurrent}
-          className="absolute bottom-4 right-6 z-20 px-3 py-1.5 rounded-full bg-primary text-white text-xs font-semibold shadow-lg hover:bg-primary-hover flex items-center gap-1.5 transition-all duration-fast animate-bounce"
+          className="absolute bottom-4 right-6 z-20 px-3 py-1.5 rounded-full bg-primary text-on-primary text-xs font-semibold shadow-lg hover:bg-primary-hover flex items-center gap-1.5 transition-all duration-fast animate-bounce"
           aria-label="Jump to currently playing segment"
         >
           <ArrowDownCircle className="w-3.5 h-3.5" />
@@ -268,7 +268,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
           onClick={() => setEditingSpeakerId(null)}
         >
           <div
-            className="w-full max-w-sm rounded-lg border border-border bg-surface-elevated p-5 shadow-xl space-y-4"
+            className="w-full max-w-sm rounded-2xl border border-border bg-surface-elevated p-5 shadow-xl space-y-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div>
@@ -293,7 +293,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                 }
               }}
               placeholder="e.g. Morgan Vance"
-              className="w-full h-9 px-3 rounded border border-border bg-surface-elevated text-xs text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className="w-full h-9 px-3 rounded-lg border border-border bg-surface-sunken text-xs text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               aria-label="New speaker display name"
             />
 
@@ -301,14 +301,14 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
               <button
                 type="button"
                 onClick={() => setEditingSpeakerId(null)}
-                className="px-3 py-1.5 rounded text-xs text-ink-muted hover:text-ink hover:bg-surface transition-colors"
+                className="px-3.5 py-1.5 rounded-full text-xs text-ink-muted hover:text-ink hover:bg-surface-hover transition-colors"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={() => handleSaveSpeakerName(editingSpeakerId)}
-                className="px-3 py-1.5 rounded bg-primary text-white text-xs font-semibold hover:bg-primary-hover transition-colors"
+                className="px-3.5 py-1.5 rounded-full bg-primary text-on-primary text-xs font-semibold hover:bg-primary-hover transition-colors"
               >
                 Save Name
               </button>

@@ -22,14 +22,11 @@ import {
   type KnowledgeSearchResultDTO,
   type KnowledgeThreadDTO,
 } from "../lib/tauri";
-import { BookOpen, CheckCircle2, ChevronRight, FileText, LoaderCircle, Plus, Search, Send, ShieldCheck, Square, Upload } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronRight, FileText, LoaderCircle, Search, Send, ShieldCheck, Square, Upload } from "lucide-react";
+import { KNOWLEDGE_SCOPE_LABELS, openKnowledgeThread } from "../lib/knowledgeThreads";
+import { useKnowledgeStore } from "../stores/knowledgeStore";
 
-const scopeLabels: Record<KnowledgeScope, string> = {
-  this_meeting: "This meeting",
-  all_meetings: "All meetings",
-  documents_only: "Documents only",
-  everything: "Everything",
-};
+const scopeLabels = KNOWLEDGE_SCOPE_LABELS;
 
 function citationLabel(citation: KnowledgeMessageDTO["citations"][number]): string {
   if (citation.page_number) return citation.source_title + " · page " + citation.page_number;
@@ -43,7 +40,8 @@ function citationLabel(citation: KnowledgeMessageDTO["citations"][number]): stri
 
 export const KnowledgeContent: React.FC = () => {
   const queryClient = useQueryClient();
-  const [selectedThreadId, setSelectedThreadId] = useState("th-1");
+  const selectedThreadId = useKnowledgeStore((s) => s.selectedThreadId);
+  const setSelectedThreadId = useKnowledgeStore((s) => s.setSelectedThreadId);
   const [scope, setScope] = useState<KnowledgeScope>("all_meetings");
   const [inputQuery, setInputQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -78,6 +76,10 @@ export const KnowledgeContent: React.FC = () => {
   });
   const messages = persistedMessages.concat(localMessages.filter((message) => message.thread_id === activeThreadId));
 
+  // The conversation list lives in the app sidebar; keep the fixed scope in step with whichever thread it opens.
+  useEffect(() => {
+    if (selectedThread) setScope(selectedThread.scope);
+  }, [selectedThread?.id, selectedThread?.scope]);
   useEffect(() => {
     if (threads?.[0] && !threads.some((thread) => thread.id === selectedThreadId)) {
       setSelectedThreadId(threads[0].id);
@@ -94,11 +96,15 @@ export const KnowledgeContent: React.FC = () => {
       setError("Choose “Ask about this meeting” from a meeting detail view to use this scope.");
       return;
     }
-    const thread = await createKnowledgeThread(nextScope, meetingId);
-    setScope(nextScope);
-    setSelectedThreadId(thread.id);
-    setLocalMessages([]);
-    await queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
+    try {
+      // Reuses an existing empty conversation with this scope instead of piling up identical new ones.
+      await openKnowledgeThread(queryClient, threads ?? [], nextScope, meetingId);
+      setScope(nextScope);
+      setLocalMessages([]);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "A Knowledge conversation could not be created.");
+    }
   };
 
   const send = async (event: React.FormEvent) => {
@@ -193,29 +199,35 @@ export const KnowledgeContent: React.FC = () => {
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-bg">
       <Header title="Knowledge Base" subtitle="Cited, fixed-scope chat over local meetings and uploaded documents" />
-      <div className="flex-1 grid grid-cols-1 md:grid-cols-12 overflow-hidden">
-        <aside className="md:col-span-4 xl:col-span-3 border-r border-border/80 bg-surface/30 p-4 flex flex-col min-h-0 overflow-y-auto gap-6" aria-label="Knowledge Base sidebar">
+      <div className="flex-1 grid grid-cols-1 md:grid-cols-12 gap-4 px-6 pb-6 overflow-hidden">
+        <aside className="md:col-span-4 xl:col-span-3 rounded-2xl bg-surface p-4 flex flex-col min-h-0 overflow-y-auto gap-6" aria-label="Knowledge sources">
           <section>
-            <div className="flex items-center justify-between mb-2"><span className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Conversations</span><button type="button" onClick={() => void newThread(scope)} className="p-1 rounded text-primary hover:bg-surface focus-visible:ring-2 focus-visible:ring-accent" title="New conversation" aria-label="Start a new Knowledge conversation"><Plus className="w-4 h-4" /></button></div>
-            <div className="space-y-1">{(threads || []).map((thread) => <button key={thread.id} type="button" onClick={() => { setSelectedThreadId(thread.id); setScope(thread.scope); setLocalMessages([]); }} className={"w-full text-left p-2.5 rounded-lg text-xs " + (activeThreadId === thread.id ? "bg-green-tint text-green-text font-semibold border border-primary/20" : "text-ink hover:bg-surface border border-transparent")}><p className="truncate">{thread.title}</p><span className="text-[10px] text-ink-muted font-normal mt-0.5 block">{scopeLabels[thread.scope]} · {thread.message_count} messages</span></button>)}{!threads?.length && <EmptyState icon={<BookOpen className="w-5 h-5 text-primary" />} title="No conversations" description="Start a cited Knowledge inquiry." />}</div>
+            <div className="flex items-center justify-between mb-2"><span className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Documents ({documents?.length || 0})</span><label className="p-1.5 rounded-full text-primary hover:bg-surface-hover cursor-pointer focus-within:ring-2 focus-within:ring-accent" title="Upload document" aria-label="Upload document"><Upload className="w-3.5 h-3.5" /><input type="file" accept=".pdf,.md,.markdown,.txt,text/plain,text/markdown,application/pdf" className="sr-only" onChange={(event) => void upload(event)} /></label></div>
+            <div className="space-y-1.5">{(documents || []).map((document) => <div key={document.id} className="p-2.5 rounded-lg bg-bg text-xs flex items-center justify-between gap-2"><div className="flex items-center gap-2 truncate"><FileText className="w-3.5 h-3.5 text-primary shrink-0" /><span className="truncate font-medium text-ink">{document.filename}</span></div><Badge variant={document.status === "error" ? "red" : document.status === "indexing" ? "amber" : "green"}>{document.status}</Badge></div>)}</div>
           </section>
 
-          <section>
-            <div className="flex items-center justify-between mb-2"><span className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Documents ({documents?.length || 0})</span><label className="p-1 rounded text-primary hover:bg-surface cursor-pointer focus-within:ring-2 focus-within:ring-accent" title="Upload document" aria-label="Upload document"><Upload className="w-3.5 h-3.5" /><input type="file" accept=".pdf,.md,.markdown,.txt,text/plain,text/markdown,application/pdf" className="sr-only" onChange={(event) => void upload(event)} /></label></div>
-            <div className="space-y-1.5">{(documents || []).map((document) => <div key={document.id} className="p-2 rounded bg-surface-elevated border border-border/80 text-xs flex items-center justify-between gap-2"><div className="flex items-center gap-2 truncate"><FileText className="w-3.5 h-3.5 text-primary shrink-0" /><span className="truncate font-medium text-ink">{document.filename}</span></div><Badge variant={document.status === "error" ? "red" : document.status === "indexing" ? "amber" : "green"}>{document.status}</Badge></div>)}</div>
-          </section>
-
-          <form onSubmit={search} className="space-y-2"><label htmlFor="knowledge-search" className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Semantic search</label><div className="flex gap-1.5"><input id="knowledge-search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search by meaning…" className="min-w-0 flex-1 h-8 px-2.5 rounded border border-border bg-surface-elevated text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent" /><Button variant="secondary" size="sm" type="submit" aria-label="Run semantic search"><Search className="w-3.5 h-3.5" /></Button></div>{searchResults.length > 0 && <div className="space-y-1.5" aria-label="Semantic search results">{searchResults.map((result) => <button key={result.chunk_id} type="button" className="w-full text-left p-2 rounded bg-surface-elevated border border-border text-[11px] hover:border-primary"><span className="block font-semibold text-primary">{result.source_title}</span><span className="line-clamp-2 text-ink-muted">{result.text}</span></button>)}</div>}</form>
+          <form onSubmit={search} className="space-y-2"><label htmlFor="knowledge-search" className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Semantic search</label><div className="flex gap-1.5"><input id="knowledge-search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search by meaning…" className="min-w-0 flex-1 h-8 px-3 rounded-full bg-bg text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent" /><Button variant="secondary" size="sm" type="submit" aria-label="Run semantic search"><Search className="w-3.5 h-3.5" /></Button></div>{searchResults.length > 0 && <div className="space-y-1.5" aria-label="Semantic search results">{searchResults.map((result) => <button key={result.chunk_id} type="button" className="w-full text-left p-2.5 rounded-lg bg-bg text-[11px] hover:bg-surface-hover"><span className="block font-semibold text-primary">{result.source_title}</span><span className="line-clamp-2 text-ink-muted">{result.text}</span></button>)}</div>}</form>
           {error && <p role="alert" className="text-[11px] text-status-error">{error}</p>}
-          <div className="mt-auto p-2.5 rounded bg-surface-sunken border border-border flex items-center justify-between text-xs"><span className="text-ink-muted font-medium">Vector index</span><span className={"flex items-center gap-1 font-semibold text-[11px] " + (indexStatus?.state === "blocked" ? "text-status-warning" : "text-green-text")}>{indexStatus?.state === "blocked" ? <LoaderCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5 text-primary" />}{indexStatus?.state === "blocked" ? "Model needed" : indexStatus?.pending_sources ? "Indexing" : "Ready"}</span></div>
+          <div className="mt-auto p-2.5 rounded-xl bg-bg flex items-center justify-between text-xs"><span className="text-ink-muted font-medium">Vector index</span><span className={"flex items-center gap-1 font-semibold text-[11px] " + (indexStatus?.state === "blocked" ? "text-status-warning" : "text-green-text")}>{indexStatus?.state === "blocked" ? <LoaderCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5 text-primary" />}{indexStatus?.state === "blocked" ? "Model needed" : indexStatus?.pending_sources ? "Indexing" : "Ready"}</span></div>
         </aside>
 
-        <main className="md:col-span-8 xl:col-span-9 flex flex-col min-h-0 bg-surface-elevated">
-          <div className="min-h-12 border-b border-border/80 px-6 py-2 flex flex-wrap items-center justify-between gap-3 bg-surface/20"><label className="flex items-center gap-2 text-xs"><span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Scope</span><select value={scope} onChange={(event) => void newThread(event.target.value as KnowledgeScope)} className="h-8 px-2 rounded border border-border bg-surface-elevated text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent">{Object.entries(scopeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="flex items-center gap-2 text-xs"><span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Destination</span><select aria-label="Chat provider destination" className="h-8 px-2 rounded border border-border bg-surface-elevated text-xs text-ink"><option>Local · llama-server</option><option>Ollama</option><option>OpenAI</option><option>Anthropic</option><option>Gemini</option></select><ShieldCheck className="w-4 h-4 text-primary" aria-label="Local destination" /></label></div>
-          <div className="flex-1 p-6 overflow-y-auto space-y-4" aria-live="polite">
-            {messages.length === 0 ? <EmptyState icon={<BookOpen className="w-8 h-8 text-primary" />} title="Start a Knowledge inquiry" description="Ask about decisions, concepts, or deadlines in the selected scope." actionLabel="Summarize recent decisions" onAction={() => setInputQuery("Summarize the key decisions from the selected sources.")} /> : messages.map((message) => <div key={message.id} className={"p-4 rounded-lg max-w-3xl text-xs sm:text-sm leading-relaxed " + (message.role === "user" ? "ml-auto bg-primary text-white font-medium" : "mr-auto bg-surface border border-border text-ink")}><p className="whitespace-pre-wrap">{message.content || (message.state === "pending" ? "Thinking…" : "")}</p>{message.state === "canceled" && <p className="mt-2 text-[11px] text-status-warning">[Incomplete Response]</p>}{message.citations.length > 0 && <div className="mt-3 pt-2.5 border-t border-border/40 space-y-1"><span className="font-semibold text-[11px] uppercase tracking-wider text-ink-muted block">Sources</span>{message.citations.map((citation) => <button key={citation.id} type="button" className="flex items-center gap-1.5 text-[11px] text-primary hover:underline" title="Citation location"><ChevronRight className="w-3 h-3" />{citationLabel(citation)}</button>)}</div>}</div>)}
+        <main className="md:col-span-8 xl:col-span-9 flex flex-col min-h-0">
+          <div className="min-h-12 px-1 pt-1.5 pb-3 flex flex-wrap items-center justify-between gap-3">
+            <label className="flex items-center gap-2 text-xs">
+              <span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Scope</span><select value={scope} onChange={(event) => void newThread(event.target.value as KnowledgeScope)} className="h-8 pl-3 pr-2 rounded-full border border-border bg-surface-hover text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent">{Object.entries(scopeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="flex items-center gap-2 text-xs">
+              <span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Destination</span>
+              <select aria-label="Chat provider destination" className="h-8 pl-3 pr-2 rounded-full border border-border bg-surface-hover text-xs text-ink">
+                <option>Local · llama-server</option>
+                <option>Ollama</option><option>OpenAI</option>
+                <option>Anthropic</option>
+                <option>Gemini</option>
+              </select>
+            </label>
           </div>
-          <div className="p-4 border-t border-border bg-surface/30"><form onSubmit={send} className="flex items-center gap-3 max-w-3xl mx-auto"><input aria-label="Knowledge question" type="text" value={inputQuery} onChange={(event) => setInputQuery(event.target.value)} placeholder="Ask a question about your local sources…" className="flex-1 h-10 px-3.5 rounded-lg border border-border bg-surface-elevated text-xs sm:text-sm text-ink focus-visible:ring-2 focus-visible:ring-accent" />{streamingId ? <Button variant="secondary" size="md" type="button" onClick={cancel}><Square className="w-3.5 h-3.5 mr-1.5" />Stop</Button> : <Button variant="primary" size="md" type="submit" disabled={!inputQuery.trim()}><Send className="w-4 h-4 mr-1.5" />Send</Button>}</form><p className="max-w-3xl mx-auto mt-2 text-[10px] text-ink-muted">Responses are grounded in retrieved sources. The selected destination is shown before dispatch.</p></div>
+          <div className="flex-1 py-4 overflow-y-auto space-y-4" aria-live="polite">
+            {messages.length === 0 ? <EmptyState icon={<BookOpen className="w-8 h-8 text-primary" />} title="Start a Knowledge inquiry" description="Ask about decisions, concepts, or deadlines in the selected scope." actionLabel="Summarize recent decisions" onAction={() => setInputQuery("Summarize the key decisions from the selected sources.")} /> : messages.map((message) => <div key={message.id} className={"p-4 rounded-2xl max-w-3xl text-sm leading-relaxed " + (message.role === "user" ? "ml-auto bg-primary text-on-primary font-medium" : "mr-auto bg-surface text-ink")}><p className="whitespace-pre-wrap">{message.content || (message.state === "pending" ? "Thinking…" : "")}</p>{message.state === "canceled" && <p className="mt-2 text-[11px] text-status-warning">[Incomplete Response]</p>}{message.citations.length > 0 && <div className="mt-3 pt-2.5 border-t border-border/40 space-y-1"><span className="font-semibold text-[11px] uppercase tracking-wider text-ink-muted block">Sources</span>{message.citations.map((citation) => <button key={citation.id} type="button" className="flex items-center gap-1.5 text-[11px] text-primary hover:underline" title="Citation location"><ChevronRight className="w-3 h-3" />{citationLabel(citation)}</button>)}</div>}</div>)}
+          </div>
+          <div className="pt-2"><form onSubmit={send} className="flex items-center gap-3 max-w-3xl mx-auto rounded-3xl border border-border bg-surface pl-5 pr-2.5 py-2"><input aria-label="Knowledge question" type="text" value={inputQuery} onChange={(event) => setInputQuery(event.target.value)} placeholder="Ask a question about your local sources…" className="flex-1 h-9 bg-transparent text-sm text-ink placeholder:text-ink-subtle focus-visible:outline-none" />{streamingId ? <Button variant="secondary" size="sm" type="button" onClick={cancel}><Square className="w-3.5 h-3.5" />Stop</Button> : <Button variant="primary" size="icon" type="submit" aria-label="Send" title="Send" disabled={!inputQuery.trim()}><Send className="w-4 h-4" /></Button>}</form><p className="max-w-3xl mx-auto mt-2 text-[10px] text-ink-muted">Responses are grounded in retrieved sources. The selected destination is shown before dispatch.</p></div>
         </main>
       </div>
     </div>

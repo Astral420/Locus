@@ -1,5 +1,6 @@
-import React from "react";
-import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
+import React, { useState } from "react";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Disc,
   FolderKanban,
@@ -8,180 +9,257 @@ import {
   Settings,
   PanelLeftClose,
   PanelLeftOpen,
-  ArrowDownToLine,
+  Download,
+  Plus,
 } from "lucide-react";
 import { useUiStore } from "../../stores/uiStore";
 import { useRecordingStore } from "../../stores/recordingStore";
+import { useKnowledgeStore } from "../../stores/knowledgeStore";
+import { listKnowledgeThreads, listModels, type KnowledgeThreadDTO, type ModelAssetDTO } from "../../lib/tauri";
+import { KNOWLEDGE_SCOPE_LABELS, openKnowledgeThread } from "../../lib/knowledgeThreads";
+import { hasOverlayTitleBar } from "../../lib/platform";
+import { Kbd } from "../ui/Kbd";
+import { Popover } from "../ui/Popover";
+import { ProgressBar } from "../ui/ProgressBar";
+
+interface ActiveDownload {
+  id: string;
+  name: string;
+  progress: number;
+}
+
+export const DownloadsButton: React.FC = () => {
+  const [open, setOpen] = useState(false);
+  const downloadStatus = useUiStore((s) => s.downloadStatus);
+  const { data: models = [] } = useQuery<ModelAssetDTO[]>({ queryKey: ["models"], queryFn: listModels });
+
+  const downloads: ActiveDownload[] = [
+    ...models
+      .filter((m) => m.status === "downloading")
+      .map((m) => ({ id: m.id, name: m.name, progress: m.download_progress ?? 0 })),
+    ...(downloadStatus.active
+      ? [{ id: "ui-store", name: downloadStatus.modelName, progress: downloadStatus.progress }]
+      : []),
+  ];
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Downloads"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title="Downloads"
+        className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+          open ? "bg-surface-hover text-ink" : ""
+        }`}
+      >
+        <Download className="w-4 h-4" />
+        {downloads.length > 0 && (
+          <span aria-hidden="true" className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-primary" />
+        )}
+      </button>
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        aria-label="Download progress"
+        className="top-full left-0 mt-2 w-72 p-4"
+      >
+        {downloads.length === 0 ? (
+          <div className="flex flex-col items-center gap-3 py-5 text-center text-[13px] text-ink-muted">
+            <Download className="w-5 h-5 text-ink-subtle" aria-hidden="true" />
+            <p>
+              Your download progress
+              <br />
+              will appear here
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-3">
+            {downloads.map((d) => (
+              <li key={d.id} className="space-y-1.5">
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <span className="truncate text-ink font-medium">{d.name}</span>
+                  <span className="nums-tabular text-ink-muted shrink-0">{Math.round(d.progress)}%</span>
+                </div>
+                <ProgressBar value={d.progress} label={`Downloading ${d.name}`} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </Popover>
+    </div>
+  );
+};
+
+/** Floating controls shown while the sidebar is hidden: reopen + downloads, beside the macOS traffic lights. */
+const HiddenSidebarControls: React.FC = () => {
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const overlay = hasOverlayTitleBar();
+  return (
+    <div
+      className={`fixed top-3 z-40 flex items-center gap-0.5 ${overlay ? "left-[88px]" : "left-3"}`}
+      role="toolbar"
+      aria-label="Sidebar controls"
+    >
+      <button
+        type="button"
+        onClick={toggleSidebar}
+        aria-label="Show sidebar"
+        title="Show sidebar"
+        className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <PanelLeftOpen className="w-4 h-4" />
+      </button>
+      <DownloadsButton />
+    </div>
+  );
+};
+
+const ConversationList: React.FC<{ currentPath: string }> = ({ currentPath }) => {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const selectedThreadId = useKnowledgeStore((s) => s.selectedThreadId);
+  const setSelectedThreadId = useKnowledgeStore((s) => s.setSelectedThreadId);
+  const { data: threads = [] } = useQuery<KnowledgeThreadDTO[]>({
+    queryKey: ["knowledgeThreads"],
+    queryFn: listKnowledgeThreads,
+  });
+
+  const onKnowledge = currentPath === "/knowledge" || currentPath.startsWith("/knowledge/");
+  const effectiveId = selectedThreadId ?? threads[0]?.id ?? null;
+
+  const startNew = () => {
+    void openKnowledgeThread(queryClient, threads, "all_meetings", null)
+      .then(() => navigate({ to: "/knowledge" }))
+      .catch(() => undefined);
+  };
+
+  return (
+    <section aria-label="Conversations" className="flex-1 min-h-0 flex flex-col px-2 pt-2">
+      <div className="flex items-center justify-between px-2.5 pb-1">
+        <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-muted">Conversations</span>
+        <button
+          type="button"
+          onClick={startNew}
+          aria-label="New conversation"
+          title="New conversation"
+          className="w-6 h-6 rounded-full flex items-center justify-center text-ink-muted hover:text-ink hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {/* The list scrolls inside the sidebar; the navigation above it stays fixed. */}
+      <ul className="flex-1 min-h-0 overflow-y-auto space-y-0.5 pb-2" aria-label="Conversation history">
+        {threads.length === 0 && <li className="px-2.5 py-1.5 text-xs text-ink-subtle">No conversations yet</li>}
+        {threads.map((thread) => {
+          const isActive = onKnowledge && thread.id === effectiveId;
+          return (
+            <li key={thread.id}>
+              <button
+                type="button"
+                aria-current={isActive ? "true" : undefined}
+                onClick={() => {
+                  setSelectedThreadId(thread.id);
+                  void navigate({ to: "/knowledge" });
+                }}
+                className={`w-full text-left px-2.5 py-1.5 rounded-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                  isActive ? "bg-surface-hover text-ink" : "text-ink-muted hover:text-ink hover:bg-surface-hover/60"
+                }`}
+              >
+                <span className="block truncate text-[13px]">{thread.title}</span>
+                <span className="block truncate text-[11px] text-ink-subtle">
+                  {KNOWLEDGE_SCOPE_LABELS[thread.scope]} · {thread.message_count} {thread.message_count === 1 ? "message" : "messages"}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+};
 
 export const Sidebar: React.FC = () => {
   const routerState = useRouterState();
-  const navigate = useNavigate();
   const currentPath = routerState.location.pathname;
 
-  const { sidebarCollapsed, toggleSidebar, downloadStatus } = useUiStore();
+  const { sidebarCollapsed, toggleSidebar } = useUiStore();
   const recordingState = useRecordingStore((s) => s.state);
+  const overlay = hasOverlayTitleBar();
+
+  // Hidden entirely (no icon rail); a small control beside the traffic lights brings it back.
+  if (sidebarCollapsed) return <HiddenSidebarControls />;
 
   const navItems = [
-    {
-      to: "/record",
-      label: "Recording",
-      icon: Disc,
-      badge: recordingState === "recording" ? "LIVE" : undefined,
-    },
-    {
-      to: "/",
-      label: "Meetings",
-      icon: FolderKanban,
-    },
-    {
-      to: "/knowledge",
-      label: "Knowledge Base",
-      icon: BookOpen,
-    },
-    {
-      to: "/models",
-      label: "Model Manager",
-      icon: Cpu,
-    },
-    {
-      to: "/settings",
-      label: "Settings",
-      icon: Settings,
-    },
+    { to: "/record", label: "Recording", icon: Disc, hint: "N", badge: recordingState === "recording" ? "LIVE" : undefined },
+    { to: "/", label: "Meetings", icon: FolderKanban, hint: "K" },
+    { to: "/knowledge", label: "Knowledge Base", icon: BookOpen },
+    { to: "/models", label: "Model Manager", icon: Cpu },
+    { to: "/settings", label: "Settings", icon: Settings, hint: "," },
   ];
 
   return (
     <aside
       aria-label="Primary navigation"
-      className={`h-screen sticky top-0 flex flex-col bg-surface/50 border-r border-border transition-all duration-standard select-none z-30 shrink-0 ${
-        sidebarCollapsed ? "w-sidebar-collapsed" : "w-sidebar"
-      }`}
+      className="sticky top-2 m-2 h-[calc(100vh-1rem)] w-[232px] flex flex-col rounded-[14px] border border-border bg-bg select-none z-30 shrink-0"
     >
-      {/* Brand Header */}
-      <div className="h-14 flex items-center justify-between px-3.5 border-b border-border/60">
-        {!sidebarCollapsed && (
-          <div className="flex items-center gap-2 overflow-hidden">
-            <span className="w-5 h-5 rounded bg-primary flex items-center justify-center text-white font-mono text-[10px] font-bold">
-              L
-            </span>
-            <span className="font-semibold text-sm tracking-wider text-ink">LOCUS</span>
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={toggleSidebar}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className={`p-1.5 rounded text-ink-muted hover:text-ink hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-            sidebarCollapsed ? "mx-auto" : ""
-          }`}
-        >
-          {sidebarCollapsed ? (
-            <PanelLeftOpen className="w-4 h-4" />
-          ) : (
+      {/* Top row (centre line shared with the page title and the macOS traffic lights): downloads + hide sidebar */}
+      <div data-tauri-drag-region className="flex items-center justify-between px-3 h-[38px] shrink-0">
+        {overlay ? <div data-tauri-drag-region aria-hidden="true" className="w-[68px] h-7" /> : null}
+        <div className="flex items-center gap-0.5 ml-auto">
+          <DownloadsButton />
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            aria-label="Hide sidebar"
+            title="Hide sidebar"
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
             <PanelLeftClose className="w-4 h-4" />
-          )}
-        </button>
+          </button>
+        </div>
       </div>
 
-      {/* Nav List */}
-      <nav className="flex-1 py-3 px-2 space-y-1 overflow-y-auto">
+      {/* Nav list */}
+      <nav className="px-2 pt-2 space-y-0.5 shrink-0">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive =
             item.to === "/"
               ? currentPath === "/" || currentPath.startsWith("/meeting")
               : currentPath === item.to || currentPath.startsWith(`${item.to}/`);
+          const isLiveRecord = item.to === "/record" && recordingState === "recording";
 
           return (
             <Link
               key={item.to}
               to={item.to}
-              title={sidebarCollapsed ? item.label : undefined}
               aria-current={isActive ? "page" : undefined}
-              className={`relative flex items-center h-8 px-2.5 rounded text-xs font-medium transition-colors ${
-                isActive
-                  ? "bg-green-tint text-green-text font-semibold"
-                  : "text-ink-muted hover:text-ink hover:bg-surface"
-              } ${sidebarCollapsed ? "justify-center px-0" : "gap-2.5"}`}
+              className={`flex items-center h-9 gap-2.5 px-2.5 rounded-[10px] text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                isActive ? "bg-surface-hover text-ink" : "text-ink-muted hover:text-ink hover:bg-surface-hover/60"
+              }`}
             >
-              {/* Active left 3px indicator pill */}
-              {isActive && (
-                <span
-                  className="absolute left-0 top-1 bottom-1 w-[3px] bg-primary rounded-r"
-                  aria-hidden="true"
-                />
-              )}
               <Icon
                 className={`w-4 h-4 shrink-0 ${
-                  isActive
-                    ? "text-primary"
-                    : item.to === "/record" && recordingState === "recording"
-                    ? "text-status-recording animate-pulse"
-                    : "text-ink-muted"
+                  isLiveRecord ? "text-status-recording animate-pulse" : isActive ? "text-ink" : "text-ink-muted"
                 }`}
               />
-              {!sidebarCollapsed && (
-                <span className="truncate flex-1 text-left">{item.label}</span>
-              )}
-              {!sidebarCollapsed && item.badge && (
-                <span className="px-1.5 py-0.2 text-[10px] font-bold font-mono tracking-wider rounded bg-status-recording text-white animate-pulse">
+              <span className="truncate flex-1 text-left">{item.label}</span>
+              {item.badge && (
+                <span className="px-1.5 py-px text-[10px] font-bold font-mono tracking-wider rounded bg-status-recording text-white animate-pulse">
                   {item.badge}
                 </span>
               )}
+              {!item.badge && item.hint && <Kbd keys={item.hint} />}
             </Link>
           );
         })}
       </nav>
 
-      {/* Sidebar Footer */}
-      <div className="p-3 border-t border-border/60 bg-surface/70 space-y-2">
-        {/* Background download progress indicator */}
-        {downloadStatus.active && (
-          <div
-            onClick={() => void navigate({ to: "/models" })}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") void navigate({ to: "/models" });
-            }}
-            title="Download in progress. Click to open Model Manager."
-            aria-label={`Downloading ${downloadStatus.modelName}: ${downloadStatus.progress} percent`}
-            className="p-2 rounded bg-surface-sunken hover:bg-surface border border-border/80 cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            <div className="flex items-center justify-between text-[11px] font-mono text-ink-muted mb-1">
-              <span className="flex items-center gap-1.5 truncate">
-                <ArrowDownToLine className="w-3 h-3 text-primary animate-bounce shrink-0" />
-                {!sidebarCollapsed && <span className="truncate">{downloadStatus.modelName}</span>}
-              </span>
-              <span className="tabular-nums shrink-0 font-medium text-ink">
-                {downloadStatus.progress}%
-              </span>
-            </div>
-            <div className="w-full h-1.5 bg-border rounded-full overflow-hidden">
-              <div
-                className="h-full bg-primary transition-all duration-fast"
-                style={{ width: `${downloadStatus.progress}%` }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Offline Engine status pill */}
-        <div
-          className={`flex items-center gap-2 py-1 px-1.5 rounded text-[11px] font-mono text-green-text ${
-            sidebarCollapsed ? "justify-center" : ""
-          }`}
-          title="Engine is running offline on your local machine with zero network telemetry."
-        >
-          <span className="relative flex h-2 w-2 shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-          </span>
-          {!sidebarCollapsed && (
-            <span className="truncate tracking-tight font-medium">Offline · Local Engine</span>
-          )}
-        </div>
-      </div>
+      <ConversationList currentPath={currentPath} />
     </aside>
   );
 };

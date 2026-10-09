@@ -41,7 +41,7 @@ export const Modal: React.FC<ModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
       role="dialog"
       aria-modal="true"
       aria-labelledby="modal-title"
@@ -53,7 +53,7 @@ export const Modal: React.FC<ModalProps> = ({
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className={`relative w-full ${maxWidth} bg-surface-elevated rounded-lg border border-border shadow-xl p-6 text-left outline-none`}
+        className={`relative w-full ${maxWidth} bg-surface-elevated rounded-2xl border border-border shadow-xl p-6 text-left outline-none`}
       >
         <div className="flex items-start justify-between gap-4 mb-4">
           <div>
@@ -70,7 +70,7 @@ export const Modal: React.FC<ModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Close dialog"
-            className="p-1 rounded text-ink-muted hover:text-ink hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="p-1.5 rounded-full text-ink-muted hover:text-ink hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             <X className="w-5 h-5" />
           </button>

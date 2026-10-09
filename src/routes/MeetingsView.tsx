@@ -6,6 +6,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Skeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { SelectPill } from "../components/ui/SelectPill";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { listMeetings, type MeetingDTO } from "../lib/tauri";
@@ -17,8 +18,6 @@ import {
   Users,
   Video,
   ChevronRight,
-  Filter,
-  Calendar,
   Trash2,
   CheckCircle2,
 } from "lucide-react";
@@ -78,7 +77,7 @@ const MeetingsContent: React.FC = () => {
           <Skeleton className="h-9 w-32" />
         </div>
         {[1, 2, 3].map((i) => (
-          <div key={i} className="p-4 border border-border rounded-lg bg-surface/40 space-y-3">
+          <div key={i} className="p-4 rounded-xl bg-surface space-y-3">
             <div className="flex items-center justify-between">
               <Skeleton className="h-5 w-72" />
               <Skeleton className="h-5 w-20" />
@@ -142,66 +141,60 @@ const MeetingsContent: React.FC = () => {
       <Header
         title="Meetings"
         subtitle="Browse, search, and review your archived conversations and lectures"
-        actions={
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => void navigate({ to: "/record" })}
-          >
-            <Plus className="w-3.5 h-3.5 mr-1" />
-            Start Recording
-          </Button>
-        }
+        // actions={
+        //   <Button
+        //     variant="primary"
+        //     size="sm"
+        //     onClick={() => void navigate({ to: "/record" })}
+        //   >
+        //     <Plus className="w-3.5 h-3.5 mr-1" />
+        //     Start Recording
+        //   </Button>
+        // }
       />
 
       <div className="p-6 max-w-5xl mx-auto w-full space-y-6 flex-1 overflow-y-auto">
         {/* Controls Bar: Search & Filter */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
           <div className="relative flex-1 max-w-md">
-            <Search className="w-4 h-4 text-ink-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <Search className="w-4 h-4 text-ink-muted absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               ref={searchInputRef}
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search meetings by title or keywords… (Cmd+K)"
-              className="w-full h-9 pl-9 pr-3 rounded border border-border bg-surface-elevated text-xs text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              placeholder="Search meetings by title or keywords…"
+              className="w-full h-9 pl-10 pr-4 rounded-full bg-surface text-sm text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               aria-label="Search meetings"
             />
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Classification Filter */}
-            <div className="flex items-center gap-1.5">
-              <Filter className="w-3.5 h-3.5 text-ink-muted shrink-0" />
-              <select
-                value={typeFilter}
-                onChange={(e) => setTypeFilter(e.target.value)}
-                aria-label="Filter meetings by classification"
-                className="h-9 px-2.5 rounded border border-border bg-surface-elevated text-xs text-ink font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                <option value="all">All Classifications</option>
-                <option value="meeting">Business Meeting</option>
-                <option value="lecture">Lecture / Academic</option>
-                <option value="auto">Auto-detected</option>
-              </select>
-            </div>
+            {/* Classification filter */}
+            <SelectPill
+              aria-label="Filter meetings by classification"
+              value={typeFilter}
+              onChange={setTypeFilter}
+              options={[
+                { value: "all", label: "All Classifications" },
+                { value: "meeting", label: "Business Meeting" },
+                { value: "lecture", label: "Lecture / Academic" },
+                { value: "auto", label: "Auto-detected" },
+              ]}
+            />
 
-            {/* Date Range Filter */}
-            <div className="flex items-center gap-1.5">
-              <Calendar className="w-3.5 h-3.5 text-ink-muted shrink-0" />
-              <select
-                value={dateFilter}
-                onChange={(e) => setDateFilter(e.target.value)}
-                aria-label="Filter meetings by date range"
-                className="h-9 px-2.5 rounded border border-border bg-surface-elevated text-xs text-ink font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                <option value="all">All Time</option>
-                <option value="today">Today</option>
-                <option value="week">Past 7 Days</option>
-                <option value="month">Past 30 Days</option>
-              </select>
-            </div>
+            {/* Date range filter */}
+            <SelectPill
+              aria-label="Filter meetings by date range"
+              value={dateFilter}
+              onChange={setDateFilter}
+              options={[
+                { value: "all", label: "All Time" },
+                { value: "today", label: "Today" },
+                { value: "week", label: "Past 7 Days" },
+                { value: "month", label: "Past 30 Days" },
+              ]}
+            />
           </div>
         </div>
 
@@ -222,7 +215,7 @@ const MeetingsContent: React.FC = () => {
           />
         ) : (
           /* Meeting List */
-          <div className="space-y-2.5" role="feed" aria-label="Meeting recordings list">
+          <div className="space-y-2" role="feed" aria-label="Meeting recordings list">
             {filteredMeetings.map((meeting) => (
               <article
                 key={meeting.id}
@@ -236,7 +229,7 @@ const MeetingsContent: React.FC = () => {
                     void navigate({ to: "/meeting/$id", params: { id: meeting.id } });
                   }
                 }}
-                className="group p-4 rounded-lg border border-border bg-surface-elevated hover:bg-surface/60 transition-all duration-fast cursor-pointer flex items-center justify-between gap-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="group p-4 rounded-xl bg-surface hover:bg-surface-hover transition-colors duration-fast cursor-pointer flex items-center justify-between gap-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
                 <div className="space-y-2 min-w-0 flex-1">
                   <div className="flex items-center gap-2.5 flex-wrap">
@@ -283,7 +276,7 @@ const MeetingsContent: React.FC = () => {
                       e.stopPropagation();
                       setMeetingToDelete(meeting);
                     }}
-                    className="p-1.5 rounded text-ink-muted hover:text-status-error hover:bg-red-50 dark:hover:bg-red-950/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    className="p-2 rounded-full text-ink-muted hover:text-status-error hover:bg-status-error/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                     aria-label={`Delete meeting ${meeting.title}`}
                     title="Delete meeting"
                   >

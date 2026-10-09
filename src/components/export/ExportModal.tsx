@@ -93,10 +93,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-lg border border-border bg-surface-elevated p-6 shadow-2xl space-y-5"
+        className="w-full max-w-md rounded-2xl border border-border bg-surface-elevated p-6 shadow-2xl space-y-5"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between pb-3 border-b border-border">
+        <div className="flex items-center justify-between pb-3">
           <div>
             <h2 id="export-modal-title" className="text-base font-semibold text-ink">
               Export Meeting Content
@@ -108,7 +108,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded text-ink-muted hover:text-ink hover:bg-surface focus-visible:outline-none"
+            className="p-1.5 rounded-full text-ink-muted hover:text-ink hover:bg-surface-hover focus-visible:outline-none"
             aria-label="Close export modal"
           >
             <X className="w-5 h-5" />
@@ -116,7 +116,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         </div>
 
         {/* Quick Clipboard Copy Section */}
-        <div className="p-3.5 rounded-lg border border-border bg-surface/40 flex items-center justify-between gap-3">
+        <div className="p-3.5 rounded-xl bg-surface-sunken flex items-center justify-between gap-3">
           <div className="space-y-0.5">
             <span className="text-xs font-semibold text-ink flex items-center gap-1.5">
               <Copy className="w-3.5 h-3.5 text-primary" />
@@ -153,7 +153,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <button
               type="button"
               onClick={handleExportMarkdown}
-              className="p-3 rounded-lg border border-border bg-surface-elevated hover:bg-surface hover:border-primary/40 transition-all text-left flex items-start gap-2.5 group"
+              className="p-3 rounded-xl bg-surface-sunken hover:bg-surface-hover transition-colors text-left flex items-start gap-2.5 group"
             >
               <FileText className="w-4 h-4 text-primary shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
               <div>
@@ -166,7 +166,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <button
               type="button"
               onClick={handleExportJson}
-              className="p-3 rounded-lg border border-border bg-surface-elevated hover:bg-surface hover:border-primary/40 transition-all text-left flex items-start gap-2.5 group"
+              className="p-3 rounded-xl bg-surface-sunken hover:bg-surface-hover transition-colors text-left flex items-start gap-2.5 group"
             >
               <Code className="w-4 h-4 text-primary shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
               <div>
@@ -179,7 +179,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <button
               type="button"
               onClick={handleExportPdf}
-              className="p-3 rounded-lg border border-border bg-surface-elevated hover:bg-surface hover:border-primary/40 transition-all text-left flex items-start gap-2.5 group"
+              className="p-3 rounded-xl bg-surface-sunken hover:bg-surface-hover transition-colors text-left flex items-start gap-2.5 group"
             >
               <Printer className="w-4 h-4 text-primary shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
               <div>
@@ -192,7 +192,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <button
               type="button"
               onClick={handleExportTxt}
-              className="p-3 rounded-lg border border-border bg-surface-elevated hover:bg-surface hover:border-primary/40 transition-all text-left flex items-start gap-2.5 group"
+              className="p-3 rounded-xl bg-surface-sunken hover:bg-surface-hover transition-colors text-left flex items-start gap-2.5 group"
             >
               <Download className="w-4 h-4 text-primary shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
               <div>

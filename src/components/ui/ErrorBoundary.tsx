@@ -40,13 +40,13 @@ export class ErrorBoundary extends Component<Props, State> {
         <div
           role="alert"
           aria-live="assertive"
-          className="p-6 m-4 max-w-lg mx-auto bg-red-50/60 dark:bg-red-950/30 border border-status-error/30 rounded-lg text-left"
+          className="p-6 m-4 max-w-lg mx-auto bg-red-50/60 dark:bg-red-950/30 rounded-2xl text-left"
         >
           <div className="flex items-center gap-3 mb-3 text-status-error font-semibold">
             <AlertTriangle className="w-5 h-5 shrink-0" />
             <h2 className="text-base">{this.props.fallbackTitle || "Something went wrong in this view"}</h2>
           </div>
-          <p className="text-xs text-ink-muted mb-4 font-mono bg-surface-sunken p-2.5 rounded border border-border overflow-x-auto">
+          <p className="text-xs text-ink-muted mb-4 font-mono bg-surface-sunken p-2.5 rounded-lg overflow-x-auto">
             {this.state.error?.message || "An unexpected error occurred."}
           </p>
           <div className="flex items-center gap-3">

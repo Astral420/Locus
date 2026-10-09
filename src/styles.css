@@ -9,6 +9,7 @@
   --color-surface: oklch(0.952 0.008 85.0);      /* #F3EFEA - Linen card & pane container */
   --color-surface-elevated: oklch(1.0 0 0);      /* #FFFFFF - Pure white elevated panels, dropdowns, modals */
   --color-surface-sunken: oklch(0.935 0.010 85.0); /* #EBE6DF - Sunken gutters, scroll tracks */
+  --color-surface-hover: oklch(0.935 0.010 85.0);  /* #EBE6DF - Hover / active row fill */
 
   /* Borders & Hairlines */
   --color-border: oklch(0.902 0.010 85.0);       /* #E5E0D6 - Subtle 1px structural dividing lines */
@@ -23,6 +24,7 @@
   /* Signature Brand & Accent Greens */
   --color-primary: oklch(0.612 0.118 158.0);     /* #419873 - Primary evergreen action fill */
   --color-primary-hover: oklch(0.570 0.125 158.0);/* #388463 - Primary button hover */
+  --color-on-primary: oklch(1 0 0);  /* #FFFFFF - Text on primary fill */
   --color-accent: oklch(0.672 0.132 158.0);      /* #49AB81 - Interactive hover & secondary controls */
   --color-mint: oklch(0.735 0.144 158.0);        /* #52BF90 - Luminous transcript bar & level peak */
   --color-green-text: oklch(0.420 0.095 158.0);  /* #265C44 - High-contrast green text/badges (6.2:1) */
@@ -54,24 +56,26 @@
 
 [data-theme="dark"] {
   /* Surfaces & Grounds */
-  --color-bg: oklch(0.150 0.010 160.0);           /* #111614 - Deep obsidian slate ground */
-  --color-surface: oklch(0.200 0.012 160.0);      /* #18201C - Studio panel & card surface */
-  --color-surface-elevated: oklch(0.245 0.015 160.0);/* #202A25 - Elevated modals, popovers, dropdowns */
-  --color-surface-sunken: oklch(0.125 0.008 160.0); /* #0C100F - Sunken gutters & input fields */
+  --color-bg: oklch(0.182 0.000 90.0); /* #121212 - Neutral graphite ground */
+  --color-surface: oklch(0.218 0.000 90.0); /* #1A1A1A - Card & pane surface */
+  --color-surface-elevated: oklch(0.252 0.000 90.0); /* #222222 - Elevated modals, popovers, dropdowns */
+  --color-surface-sunken: oklch(0.164 0.000 90.0); /* #0E0E0E - Sunken gutters & input fields */
+  --color-surface-hover: oklch(0.252 0.000 90.0);  /* #222222 - Hover / active row fill */
 
   /* Borders & Hairlines */
-  --color-border: oklch(0.290 0.015 160.0);       /* #28352F - Subtle dark dividing hairlines */
-  --color-border-subtle: oklch(0.230 0.012 160.0);/* #1E2723 - Internal cell dividers */
+  --color-border: oklch(0.285 0.000 90.0); /* #2A2A2A - Hairlines */
+  --color-border-subtle: oklch(0.244 0.000 90.0); /* #202020 - Internal cell dividers */
   --color-border-active: oklch(0.735 0.144 158.0);/* #52BF90 - Luminous mint active border */
 
   /* Typography & Ink */
-  --color-ink: oklch(0.960 0.005 160.0);         /* #F0F3F1 - Crisp off-white body copy (14.5:1 contrast) */
-  --color-ink-muted: oklch(0.670 0.015 160.0);   /* #8E9C95 - Secondary text & timestamps (6.1:1) */
-  --color-ink-subtle: oklch(0.480 0.012 160.0);  /* #57635D - Muted icons & placeholders */
+  --color-ink: oklch(0.946 0.000 90.0); /* #EDEDED - Body copy */
+  --color-ink-muted: oklch(0.689 0.000 90.0); /* #9B9B9B - Secondary text & timestamps */
+  --color-ink-subtle: oklch(0.528 0.000 90.0); /* #6B6B6B - Muted icons & placeholders */
 
   /* Signature Brand & Accent Greens */
   --color-primary: oklch(0.735 0.144 158.0);     /* #52BF90 - Luminous mint action fill */
   --color-primary-hover: oklch(0.780 0.150 158.0);/* #66D4A4 - Hover state */
+  --color-on-primary: oklch(0.203 0.023 165.2);  /* #0C1A14 - Dark text on mint (about 7.8:1) */
   --color-accent: oklch(0.672 0.132 158.0);      /* #49AB81 - Secondary accent */
   --color-mint: oklch(0.735 0.144 158.0);        /* #52BF90 - High-contrast indicators */
   --color-green-text: oklch(0.780 0.130 158.0);  /* #64D6A2 - Accessible green text in dark mode */
@@ -104,24 +108,26 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     /* Surfaces & Grounds */
-    --color-bg: oklch(0.150 0.010 160.0);
-    --color-surface: oklch(0.200 0.012 160.0);
-    --color-surface-elevated: oklch(0.245 0.015 160.0);
-    --color-surface-sunken: oklch(0.125 0.008 160.0);
+    --color-bg: oklch(0.182 0.000 90.0); /* #121212 - Neutral graphite ground */
+    --color-surface: oklch(0.218 0.000 90.0); /* #1A1A1A - Card & pane surface */
+    --color-surface-elevated: oklch(0.252 0.000 90.0); /* #222222 - Elevated modals, popovers, dropdowns */
+    --color-surface-sunken: oklch(0.164 0.000 90.0); /* #0E0E0E - Sunken gutters & input fields */
+  --color-surface-hover: oklch(0.252 0.000 90.0);  /* #222222 - Hover / active row fill */
 
     /* Borders & Hairlines */
-    --color-border: oklch(0.290 0.015 160.0);
-    --color-border-subtle: oklch(0.230 0.012 160.0);
+    --color-border: oklch(0.285 0.000 90.0); /* #2A2A2A - Hairlines */
+    --color-border-subtle: oklch(0.244 0.000 90.0); /* #202020 - Internal cell dividers */
     --color-border-active: oklch(0.735 0.144 158.0);
 
     /* Typography & Ink */
-    --color-ink: oklch(0.960 0.005 160.0);
-    --color-ink-muted: oklch(0.670 0.015 160.0);
-    --color-ink-subtle: oklch(0.480 0.012 160.0);
+    --color-ink: oklch(0.946 0.000 90.0); /* #EDEDED - Body copy */
+    --color-ink-muted: oklch(0.689 0.000 90.0); /* #9B9B9B - Secondary text & timestamps */
+    --color-ink-subtle: oklch(0.528 0.000 90.0); /* #6B6B6B - Muted icons & placeholders */
 
     /* Signature Brand & Accent Greens */
     --color-primary: oklch(0.735 0.144 158.0);
     --color-primary-hover: oklch(0.780 0.150 158.0);
+  --color-on-primary: oklch(0.203 0.023 165.2);  /* #0C1A14 - Dark text on mint (about 7.8:1) */
     --color-accent: oklch(0.672 0.132 158.0);
     --color-mint: oklch(0.735 0.144 158.0);
     --color-green-text: oklch(0.780 0.130 158.0);
@@ -173,6 +179,19 @@ body {
 [data-tabular="true"] {
   font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
+}
+
+/* Tabular figures in the UI font (no monospace swap), for counts, sizes and shortcut hints */
+.nums-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Pointer use hides focus highlights on pills, buttons, links and selects (a click anywhere clears them);
+   keyboard use (Tab, arrows) brings the rings back. Text fields keep theirs so the caret target stays obvious. */
+:root[data-input-modality="pointer"] :is(button, a, select, summary, label, [role="button"], [role="switch"], [role="dialog"], [tabindex]):focus-visible,
+:root[data-input-modality="pointer"] :is(label):focus-within {
+  outline: none;
+  box-shadow: none;
 }
 
 /* Accessibility focus-visible ring */

@@ -20,12 +20,16 @@ interface UiState {
   setTheme: (theme: ThemeMode) => void;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
+  /** First-run "Offline-Ready Core Engine" notice: once closed it never returns. */
+  coreEngineNoticeDismissed: boolean;
+  dismissCoreEngineNotice: () => void;
   setDownloadStatus: (status: Partial<DownloadProgress>) => void;
   setActiveRecoveryModal: (open: boolean) => void;
 }
 
 const STORAGE_KEY_THEME = "locus_theme_preference";
 const STORAGE_KEY_SIDEBAR = "locus_sidebar_collapsed";
+const STORAGE_KEY_CORE_NOTICE = "locus_core_engine_notice_dismissed";
 
 function resolveEffectiveTheme(theme: ThemeMode): "light" | "dark" {
   if (theme === "system") {
@@ -46,6 +50,9 @@ function applyThemeToDocument(theme: "light" | "dark") {
 const initialTheme: ThemeMode = (typeof localStorage !== "undefined" &&
   (localStorage.getItem(STORAGE_KEY_THEME) as ThemeMode)) || "system";
 
+const initialCoreNoticeDismissed: boolean =
+  (typeof localStorage !== "undefined" && localStorage.getItem(STORAGE_KEY_CORE_NOTICE) === "true") || false;
+
 const initialSidebar: boolean = (typeof localStorage !== "undefined" &&
   localStorage.getItem(STORAGE_KEY_SIDEBAR) === "true") || false;
 
@@ -56,11 +63,12 @@ export const useUiStore = create<UiState>((set, get) => ({
   theme: initialTheme,
   resolvedTheme: initialResolved,
   sidebarCollapsed: initialSidebar,
+  coreEngineNoticeDismissed: initialCoreNoticeDismissed,
   downloadStatus: {
-    active: true,
-    modelName: "Llama 3.2 3B Instruct",
-    progress: 45,
-    etaSeconds: 85,
+    active: false,
+    modelName: "",
+    progress: 0,
+    etaSeconds: 0,
   },
   activeRecoveryModal: false,
 
@@ -79,6 +87,13 @@ export const useUiStore = create<UiState>((set, get) => ({
       localStorage.setItem(STORAGE_KEY_SIDEBAR, String(next));
     }
     set({ sidebarCollapsed: next });
+  },
+
+  dismissCoreEngineNotice: () => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY_CORE_NOTICE, "true");
+    }
+    set({ coreEngineNoticeDismissed: true });
   },
 
   setSidebarCollapsed: (collapsed) => {

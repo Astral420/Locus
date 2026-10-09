@@ -22,12 +22,12 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
 }) => {
   return (
     <div
-      className={`flex flex-col items-center justify-center text-center p-8 max-w-md mx-auto my-12 border border-dashed border-border rounded-lg bg-surface/30 ${className}`}
+      className={`flex flex-col items-center justify-center text-center p-8 max-w-md mx-auto my-12 rounded-2xl bg-surface ${className}`}
       role="region"
       aria-label={title}
     >
       {icon && (
-        <div className="w-12 h-12 rounded-full bg-surface-sunken flex items-center justify-center text-ink-muted mb-4 border border-border">
+        <div className="w-12 h-12 rounded-full bg-surface-hover flex items-center justify-center text-ink-muted mb-4">
           {icon}
         </div>
       )}

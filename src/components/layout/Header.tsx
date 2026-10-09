@@ -1,9 +1,10 @@
 import React from "react";
-import { Moon, Sun, Monitor, Circle, Search, PlusCircle } from "lucide-react";
-import { useUiStore, type ThemeMode } from "../../stores/uiStore";
+import { Circle } from "lucide-react";
 import { useRecordingStore } from "../../stores/recordingStore";
 import { useNavigate } from "@tanstack/react-router";
 import { formatElapsed } from "../../lib/format";
+import { hiddenSidebarInset } from "../../lib/platform";
+import { useUiStore } from "../../stores/uiStore";
 
 export interface HeaderProps {
   title?: string;
@@ -11,38 +12,24 @@ export interface HeaderProps {
   actions?: React.ReactNode;
 }
 
+/** Borderless page header (Jan style): plain title, soft REC pill, page-specific actions. Theme lives in Settings → Appearance. */
 export const Header: React.FC<HeaderProps> = ({ title, subtitle, actions }) => {
-  const { theme, setTheme } = useUiStore();
   const { state: recordingState, elapsed_seconds } = useRecordingStore();
   const navigate = useNavigate();
-
-  const nextTheme: Record<ThemeMode, ThemeMode> = {
-    system: "light",
-    light: "dark",
-    dark: "system",
-  };
-
-  const ThemeIcon = {
-    system: Monitor,
-    light: Sun,
-    dark: Moon,
-  }[theme];
+  const sidebarHidden = useUiStore((s) => s.sidebarCollapsed);
 
   return (
-    <header className="h-14 border-b border-border/80 bg-surface/40 px-6 flex items-center justify-between gap-4 sticky top-0 z-20 backdrop-blur-sm">
-      {/* Title & Context */}
-      <div className="flex items-center gap-3 min-w-0">
-        <div>
-          {title && (
-            <h1 className="text-sm font-semibold text-ink tracking-tight truncate">{title}</h1>
-          )}
-          {subtitle && (
-            <p className="text-[11px] text-ink-muted tracking-tight truncate">{subtitle}</p>
-          )}
-        </div>
+    <header
+      data-tauri-drag-region
+      className={`h-14 px-6 ${hiddenSidebarInset(sidebarHidden)} flex items-center justify-between gap-4 sticky top-0 z-20 bg-bg/90 backdrop-blur-sm`}
+    >
+      {/* Title & context */}
+      <div data-tauri-drag-region className="flex items-baseline gap-3 min-w-0">
+        {title && <h1 className="text-[15px] font-semibold text-ink tracking-tight truncate">{title}</h1>}
+        {subtitle && <p className="hidden lg:block text-[13px] text-ink-muted truncate">{subtitle}</p>}
       </div>
 
-      {/* Center Active Recording HUD Banner if recording is active outside of /record */}
+      {/* Active recording pill (shown on every screen while capture is running) */}
       {(recordingState === "recording" || recordingState === "paused") && (
         <div
           onClick={() => void navigate({ to: "/record" })}
@@ -51,7 +38,7 @@ export const Header: React.FC<HeaderProps> = ({ title, subtitle, actions }) => {
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") void navigate({ to: "/record" });
           }}
-          className="flex items-center gap-2 px-3 py-1 bg-red-500/10 border border-status-recording/30 rounded-full cursor-pointer hover:bg-red-500/20 text-xs font-mono font-medium text-status-recording focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-status-recording"
+          className="flex items-center gap-2 px-3 py-1 bg-status-recording/10 rounded-full cursor-pointer hover:bg-status-recording/20 text-xs font-mono font-medium text-status-recording focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-status-recording"
         >
           <Circle
             className={`w-2.5 h-2.5 fill-status-recording text-status-recording ${recordingState === "recording" ? "animate-ping" : ""}`}
@@ -61,32 +48,9 @@ export const Header: React.FC<HeaderProps> = ({ title, subtitle, actions }) => {
         </div>
       )}
 
-      {/* Header Actions */}
+      {/* Header actions */}
       <div className="flex items-center gap-2 shrink-0">
         {actions}
-
-        {/* Global Quick Action: New Recording */}
-        <button
-          type="button"
-          onClick={() => void navigate({ to: "/record" })}
-          title="Start Recording (Cmd/Ctrl + N)"
-          aria-label="Start a new recording"
-          className="h-8 px-2.5 rounded flex items-center gap-1.5 text-xs font-medium text-ink-muted hover:text-ink hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        >
-          <PlusCircle className="w-4 h-4 text-primary" />
-          <span className="hidden sm:inline">New Record</span>
-        </button>
-
-        {/* Theme Switcher */}
-        <button
-          type="button"
-          onClick={() => setTheme(nextTheme[theme])}
-          title={`Theme: ${theme}. Click to switch.`}
-          aria-label={`Current theme is ${theme}. Click to switch theme.`}
-          className="w-8 h-8 rounded flex items-center justify-center text-ink-muted hover:text-ink hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        >
-          <ThemeIcon className="w-4 h-4" />
-        </button>
       </div>
     </header>
   );

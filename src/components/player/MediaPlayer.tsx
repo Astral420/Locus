@@ -215,7 +215,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       tabIndex={0}
       role="region"
       aria-label="Media player master controls"
-      className="relative flex flex-col rounded-lg border border-border bg-black/95 text-white shadow-sm overflow-hidden select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      className="relative flex flex-col rounded-2xl bg-black/95 text-white shadow-sm overflow-hidden select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
       {/* Visual Canvas: Video Canvas OR Dedicated Audio Transport Card */}
       {hasVideo ? (
@@ -252,7 +252,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       ) : (
         /* Dedicated Audio Transport Card (DESIGN.md §4.2.A: No blank video!) */
         <div
-          className="relative w-full h-44 bg-gradient-to-br from-stone-950 via-[#141C18] to-stone-900 flex flex-col justify-between p-5 cursor-pointer border-b border-border/40"
+          className="relative w-full h-44 bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-900 flex flex-col justify-between p-5 cursor-pointer border-b border-border/40"
           onClick={togglePlay}
         >
           <div className="flex items-start justify-between">
@@ -427,7 +427,7 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
                 <div
                   role="menu"
                   aria-label="Select playback speed"
-                  className="absolute bottom-8 right-0 py-1 bg-surface-elevated text-ink rounded shadow-lg border border-border text-xs z-50 min-w-[70px]"
+                  className="absolute bottom-8 right-0 py-1 bg-surface-elevated text-ink rounded-xl shadow-lg border border-border text-xs z-50 min-w-[70px]"
                 >
                   {PLAYBACK_SPEEDS.map((spd) => (
                     <button

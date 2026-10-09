@@ -3,320 +3,420 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Header } from "../components/layout/Header";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { Toggle } from "../components/ui/Toggle";
+import { SelectPill } from "../components/ui/SelectPill";
+import { PathChip } from "../components/ui/PathChip";
+import { SettingsCard, SettingsRow, SectionLabel } from "../components/ui/SettingsCard";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { useUiStore, type ThemeMode } from "../stores/uiStore";
-import { checkForUpdate, configureProvider, getStorageInfo, listProviderConfigs, migrateModels, saveProviderApiKey, type ProviderConfigDTO, type StorageInfoDTO } from "../lib/tauri";
-import {
-  Settings,
-  Palette,
-  Mic,
-  Key,
-  HardDrive,
-  Shield,
-  Check,
-  EyeOff,
-  Sun,
-  Moon,
-  Monitor,
-  Lock,
-} from "lucide-react";
+import { checkForUpdate, configureProvider, getGpuBackend, getStorageInfo, listProviderConfigs, migrateModels, saveProviderApiKey, type GpuBackendDTO, type ProviderConfigDTO, type StorageInfoDTO } from "../lib/tauri";
+import { Settings, Palette, Mic, HardDrive, Shield, Lock, Cpu, Server, Cloud } from "lucide-react";
 
-type SettingsCategory =
-  | "general"
-  | "appearance"
-  | "recording"
-  | "providers"
-  | "storage"
-  | "privacy";
+type RemoteProviderId = "ollama" | "openai" | "anthropic" | "gemini";
+type ProviderId = "llama_server" | RemoteProviderId;
+type SettingsCategory = "general" | "appearance" | "recording" | "storage" | "privacy" | ProviderId;
+
+interface RemoteProviderSpec {
+  id: RemoteProviderId;
+  label: string;
+  icon: typeof Cloud;
+  blurb: string;
+  endpoint: string;
+  defaultModel: string;
+  needsKey: boolean;
+}
+
+/** Remote providers supported by the backend (PRD/SPEC: Ollama, OpenAI, Anthropic, Gemini). Endpoints mirror the backend defaults. */
+const REMOTE_PROVIDERS: RemoteProviderSpec[] = [
+  { id: "ollama", label: "Ollama", icon: Server, blurb: "Connect to an external Ollama instance (no API key).", endpoint: "http://127.0.0.1:11434", defaultModel: "", needsKey: false },
+  { id: "openai", label: "OpenAI", icon: Cloud, blurb: "Cloud API client, requires user API key", endpoint: "https://api.openai.com", defaultModel: "gpt-4o-mini", needsKey: true },
+  { id: "anthropic", label: "Anthropic", icon: Cloud, blurb: "Cloud API client, requires user API key", endpoint: "https://api.anthropic.com", defaultModel: "", needsKey: true },
+  { id: "gemini", label: "Gemini", icon: Cloud, blurb: "Cloud API client, requires user API key", endpoint: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "", needsKey: true },
+];
+
+interface RemoteForm {
+  endpoint?: string;
+  model?: string;
+  key?: string;
+}
 
 export const SettingsContent: React.FC = () => {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>("general");
   const queryClient = useQueryClient();
   const { theme, setTheme } = useUiStore();
 
-  const [openaiKey, setOpenaiKey] = useState("");
-  const [anthropicKey, setAnthropicKey] = useState("");
-  const [geminiKey, setGeminiKey] = useState("");
-  const [selectedProvider, setSelectedProvider] = useState<"local" | "openai" | "anthropic" | "gemini">("local");
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("llama_server");
+  const [forms, setForms] = useState<Partial<Record<RemoteProviderId, RemoteForm>>>({});
   const [providerMessage, setProviderMessage] = useState<string | null>(null);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [defaults, setDefaults] = useState({ systemAudio: true, screenVideo: true, threeHourBanner: true });
   const { data: providerConfigs = [] } = useQuery<ProviderConfigDTO[]>({ queryKey: ["provider-configs"], queryFn: listProviderConfigs });
   const { data: storage } = useQuery<StorageInfoDTO>({ queryKey: ["storage-info"], queryFn: getStorageInfo });
+  const { data: gpu } = useQuery<GpuBackendDTO>({ queryKey: ["gpu-backend"], queryFn: getGpuBackend });
 
-  const categories = [
+  const generalCategories = [
     { id: "general", label: "General", icon: Settings },
     { id: "appearance", label: "Appearance & Theme", icon: Palette },
     { id: "recording", label: "Recording Defaults", icon: Mic },
-    { id: "providers", label: "LLM Providers", icon: Key },
     { id: "storage", label: "Storage & Relocation", icon: HardDrive },
     { id: "privacy", label: "Privacy & Sovereignty", icon: Shield },
   ] as const;
 
+  const inputClass =
+    "w-full h-9 px-3 rounded-lg border border-border bg-bg text-xs font-mono text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+
+  const configFor = (id: ProviderId) => providerConfigs.find((c) => c.provider === id);
+  const providerLabel = (id: ProviderId) =>
+    id === "llama_server" ? "Llama.cpp (local, offline)" : REMOTE_PROVIDERS.find((p) => p.id === id)!.label;
+
+  const formValue = (spec: RemoteProviderSpec, field: "endpoint" | "model") => {
+    const edited = forms[spec.id]?.[field];
+    if (edited !== undefined) return edited;
+    const saved = configFor(spec.id);
+    if (saved) return field === "endpoint" ? saved.destination : saved.model;
+    return field === "endpoint" ? spec.endpoint : spec.defaultModel;
+  };
+  const setForm = (id: RemoteProviderId, patch: RemoteForm) =>
+    setForms((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+
+  const saveRemote = (spec: RemoteProviderSpec) => {
+    const endpoint = formValue(spec, "endpoint").trim();
+    const model = formValue(spec, "model").trim();
+    const key = forms[spec.id]?.key ?? "";
+    setProviderMessage(null);
+    void configureProvider(spec.id, model, endpoint, true)
+      .then(() => (spec.needsKey ? saveProviderApiKey(spec.id, key) : undefined))
+      .then(() => {
+        setProviderMessage(
+          spec.needsKey
+            ? `${spec.label} is configured in the operating-system keychain.`
+            : `${spec.label} is configured.`
+        );
+        setForm(spec.id, { key: "" });
+        void queryClient.invalidateQueries({ queryKey: ["provider-configs"] });
+      })
+      .catch((error: unknown) => setProviderMessage(error instanceof Error ? error.message : "Provider configuration failed."));
+  };
+
+  const navButtonClass = (isActive: boolean) =>
+    `w-full h-9 px-3 rounded-[10px] text-sm flex items-center gap-2.5 transition-colors text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+      isActive ? "bg-surface-hover text-ink" : "text-ink-muted hover:text-ink hover:bg-surface-hover/60"
+    }`;
+
+  const selectCategory = (id: SettingsCategory) => {
+    setProviderMessage(null);
+    setActiveCategory(id);
+  };
+
+  const providerNavButton = (id: ProviderId, label: string, Icon: typeof Cloud) => (
+    <button
+      key={id}
+      type="button"
+      onClick={() => selectCategory(id)}
+      aria-current={activeCategory === id ? "page" : undefined}
+      className={navButtonClass(activeCategory === id)}
+    >
+      <Icon className="w-4 h-4 shrink-0" />
+      <span className="truncate flex-1">{label}</span>
+      {configFor(id)?.configured && <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" />}
+    </button>
+  );
+
+  const subLabel = (text: string) => (
+    <div className="px-3 pt-2 pb-1 text-[11px] uppercase tracking-[0.08em] text-ink-subtle">{text}</div>
+  );
+
+  const policyCard = (
+    <SettingsCard title="Authorization">
+      <SettingsRow
+        label={
+          <span className="inline-flex items-center gap-2">
+            <Lock className="w-4 h-4 text-primary" /> Sovereign Provider Policy (Zero Silent Remote Failover)
+          </span>
+        }
+        description={
+          <>
+            Active selected provider: <strong className="text-ink font-medium">{providerLabel(selectedProvider)}</strong>.
+            Configuring credentials makes remote APIs available, but Locus never sends meeting content until you select that provider. Credentials are saved exclusively in your OS keychain.
+          </>
+        }
+      />
+    </SettingsCard>
+  );
+
+  const selectButton = (id: ProviderId) => (
+    <Button variant={selectedProvider === id ? "primary" : "secondary"} size="sm" onClick={() => setSelectedProvider(id)}>
+      {selectedProvider === id ? "Selected (Active)" : "Select"}
+    </Button>
+  );
+
+  const remoteSpec = REMOTE_PROVIDERS.find((p) => p.id === activeCategory);
+
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-bg">
+    <div className="flex-1 flex flex-col min-h-0">
       <Header
         title="Settings"
-        subtitle="Manage appearance, default capture preferences, provider credentials, and storage location"
+        subtitle="Appearance, capture defaults, providers, and storage"
       />
 
-      <div className="flex-1 grid grid-cols-1 md:grid-cols-12 gap-0 overflow-hidden">
-        {/* Category Navigation (Column 2) */}
-        <div className="md:col-span-4 xl:col-span-3 border-r border-border/80 bg-surface/30 p-3 space-y-1 overflow-y-auto">
-          {categories.map((cat) => {
+      <div className="flex-1 flex gap-4 px-6 pb-6 min-h-0 overflow-hidden">
+        {/* In-page secondary navigation */}
+        <nav aria-label="Settings categories" className="w-[220px] shrink-0 overflow-y-auto space-y-0.5">
+          {generalCategories.map((cat) => {
             const Icon = cat.icon;
-            const isActive = activeCategory === cat.id;
             return (
               <button
                 key={cat.id}
                 type="button"
-                onClick={() => setActiveCategory(cat.id)}
-                className={`w-full h-9 px-3 rounded-lg text-xs font-medium flex items-center gap-2.5 transition-colors text-left ${
-                  isActive
-                    ? "bg-green-tint text-green-text font-semibold border border-primary/20"
-                    : "text-ink-muted hover:text-ink hover:bg-surface"
-                }`}
+                onClick={() => selectCategory(cat.id)}
+                aria-current={activeCategory === cat.id ? "page" : undefined}
+                className={navButtonClass(activeCategory === cat.id)}
               >
-                <Icon className={`w-4 h-4 ${isActive ? "text-primary" : "text-ink-muted"}`} />
-                <span>{cat.label}</span>
+                <Icon className="w-4 h-4 shrink-0" />
+                <span className="truncate">{cat.label}</span>
               </button>
             );
           })}
-        </div>
 
-        {/* Category Content Panel (Column 3) */}
-        <div className="md:col-span-8 xl:col-span-9 p-8 overflow-y-auto bg-surface-elevated space-y-8 max-w-2xl">
+          <SectionLabel>Providers</SectionLabel>
+          {subLabel("Local")}
+          {providerNavButton("llama_server", "Llama.cpp", Cpu)}
+          {subLabel("Remote")}
+          {REMOTE_PROVIDERS.map((p) => providerNavButton(p.id, p.label, p.icon))}
+        </nav>
+
+        {/* Grouped cards */}
+        <div className="flex-1 min-w-0 max-w-[720px] overflow-y-auto space-y-3">
           {/* GENERAL */}
           {activeCategory === "general" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-sm font-semibold text-ink">General</h2>
-                <p className="text-xs text-ink-muted mt-1">Locus keeps capture local by default and never enables a remote destination implicitly.</p>
-              </div>
-              <div className="rounded-lg border border-border bg-surface p-4 text-xs space-y-3">
-                <div className="flex items-center justify-between"><span className="text-ink-muted">Configured providers</span><span className="font-semibold text-ink">{providerConfigs.filter((config) => config.configured).length}</span></div>
-                <div className="flex items-center justify-between border-t border-border pt-3"><span className="text-ink-muted">Automatic telemetry</span><Badge variant="green" size="sm">Disabled</Badge></div>
-                <div className="flex items-center justify-between border-t border-border pt-3 gap-3"><span className="text-ink-muted">Updates</span><Button variant="secondary" size="sm" onClick={() => void checkForUpdate().then((result) => setUpdateMessage(result.available_version ? `Version ${result.available_version} is available on the stable channel.` : "Locus is up to date on the stable channel.")).catch((error: unknown) => setUpdateMessage(error instanceof Error ? error.message : "Update check failed."))}>Check stable channel</Button></div>
-                {updateMessage && <p role="status" className="text-green-text">{updateMessage}</p>}
-              </div>
-            </div>
+            <SettingsCard title="General">
+              <SettingsRow
+                label="Configured providers"
+                description="Locus keeps capture local by default and never enables a remote destination implicitly."
+                control={<span className="text-sm font-medium text-ink nums-tabular">{providerConfigs.filter((config) => config.configured).length}</span>}
+              />
+              <SettingsRow
+                label="Automatic telemetry"
+                description="Nothing is sent from this device."
+                control={<Badge variant="green" size="sm">Disabled</Badge>}
+              />
+              <SettingsRow
+                label="Updates"
+                description="Check the stable channel for a newer version of Locus."
+                control={
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() =>
+                      void checkForUpdate()
+                        .then((result) =>
+                          setUpdateMessage(
+                            result.available_version
+                              ? `Version ${result.available_version} is available on the stable channel.`
+                              : "Locus is up to date on the stable channel."
+                          )
+                        )
+                        .catch((error: unknown) => setUpdateMessage(error instanceof Error ? error.message : "Update check failed."))
+                    }
+                  >
+                    Check stable channel
+                  </Button>
+                }
+              >
+                {updateMessage && <p role="status" className="text-xs text-green-text">{updateMessage}</p>}
+              </SettingsRow>
+            </SettingsCard>
           )}
+
           {/* APPEARANCE */}
           {activeCategory === "appearance" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-sm font-semibold text-ink">Color Theme</h2>
-                <p className="text-xs text-ink-muted mt-1">
-                  Choose between Architectural Paper Studio (Light), Obsidian Slate (Dark), or synchronize with your operating system preferences.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { id: "system", label: "System Sync", icon: Monitor },
-                  { id: "light", label: "Paper Studio (Light)", icon: Sun },
-                  { id: "dark", label: "Obsidian Slate (Dark)", icon: Moon },
-                ].map((opt) => {
-                  const Icon = opt.icon;
-                  const isSel = theme === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setTheme(opt.id as ThemeMode)}
-                      className={`p-4 rounded-lg border text-left transition-all ${
-                        isSel
-                          ? "border-primary bg-green-tint/30 ring-1 ring-primary/40 font-semibold"
-                          : "border-border bg-surface hover:bg-surface-sunken text-ink-muted"
-                      }`}
-                    >
-                      <Icon className={`w-5 h-5 mb-2 ${isSel ? "text-primary" : "text-ink-muted"}`} />
-                      <span className="text-xs text-ink block">{opt.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            <SettingsCard title="Appearance">
+              <SettingsRow
+                label="Theme"
+                description="System follows your OS. Light is the paper studio; dark is the graphite studio."
+                control={
+                  <SelectPill
+                    aria-label="Theme"
+                    value={theme}
+                    onChange={(v) => setTheme(v as ThemeMode)}
+                    options={[
+                      { value: "system", label: "System" },
+                      { value: "light", label: "Light" },
+                      { value: "dark", label: "Dark" },
+                    ]}
+                  />
+                }
+              />
+            </SettingsCard>
           )}
 
           {/* RECORDING DEFAULTS */}
           {activeCategory === "recording" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-sm font-semibold text-ink">Capture Defaults</h2>
-                <p className="text-xs text-ink-muted mt-1">
-                  Standard capture configuration applied when launching new sessions.
-                </p>
-              </div>
-
-              <div className="space-y-3 bg-surface-sunken p-4 rounded-lg border border-border text-xs">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="font-semibold text-ink block">Default System Audio</span>
-                    <span className="text-ink-muted">Always pre-select System Audio on session launch</span>
-                  </div>
-                  <input type="checkbox" defaultChecked className="rounded accent-primary" />
-                </div>
-                <div className="flex items-center justify-between pt-2 border-t border-border/60">
-                  <div>
-                    <span className="font-semibold text-ink block">Default Screen Video</span>
-                    <span className="text-ink-muted">Enable automatic slide extraction via OpenCV differencing</span>
-                  </div>
-                  <input type="checkbox" defaultChecked className="rounded accent-primary" />
-                </div>
-                <div className="flex items-center justify-between pt-2 border-t border-border/60">
-                  <div>
-                    <span className="font-semibold text-ink block">3-Hour Advisory Banner</span>
-                    <span className="text-ink-muted">Show non-blocking advisory notification without interrupting recording</span>
-                  </div>
-                  <input type="checkbox" defaultChecked className="rounded accent-primary" />
-                </div>
-              </div>
-            </div>
+            <SettingsCard title="Capture Defaults">
+              <SettingsRow
+                label="Default System Audio"
+                description="Always pre-select System Audio on session launch"
+                control={<Toggle label="Default System Audio" checked={defaults.systemAudio} onChange={(v) => setDefaults((d) => ({ ...d, systemAudio: v }))} />}
+              />
+              <SettingsRow
+                label="Default Screen Video"
+                description="Enable automatic slide extraction via OpenCV differencing"
+                control={<Toggle label="Default Screen Video" checked={defaults.screenVideo} onChange={(v) => setDefaults((d) => ({ ...d, screenVideo: v }))} />}
+              />
+              <SettingsRow
+                label="3-Hour Advisory Banner"
+                description="Show non-blocking advisory notification without interrupting recording"
+                control={<Toggle label="3-Hour Advisory Banner" checked={defaults.threeHourBanner} onChange={(v) => setDefaults((d) => ({ ...d, threeHourBanner: v }))} />}
+              />
+            </SettingsCard>
           )}
 
-          {/* LLM PROVIDERS */}
-          {activeCategory === "providers" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-sm font-semibold text-ink">AI Provider Configuration & Authorization</h2>
-                <p className="text-xs text-ink-muted mt-1">
-                  Configuring credentials makes remote APIs available, but Locus will never send meeting content until you explicitly select that provider as your authorized destination.
-                </p>
-              </div>
+          {/* PROVIDERS: LOCAL / Llama.cpp */}
+          {activeCategory === "llama_server" && (
+            <>
+              {policyCard}
+              <SettingsCard title="Llama.cpp">
+                <SettingsRow
+                  label="Local llama-server"
+                  description="Private loopback inference, zero data leaves machine"
+                  control={selectButton("llama_server")}
+                />
+              </SettingsCard>
+              <SettingsCard title="Inference Backend">
+                <SettingsRow
+                  label={`Backend: ${gpu ? gpu.backend.toUpperCase() : "Detecting…"}`}
+                  description={gpu?.reason ?? "Probing the hardware that runs local summarization and embeddings."}
+                  control={gpu ? <Badge variant={gpu.backend === "cpu" ? "neutral" : "green"} size="sm">{gpu.backend.toUpperCase()}</Badge> : undefined}
+                />
+                {gpu && (
+                  <SettingsRow label="Architecture" control={<Badge size="sm">{gpu.architecture}</Badge>} />
+                )}
+                {gpu?.device && <SettingsRow label="Device" control={<span className="text-xs text-ink-muted">{gpu.device}</span>} />}
+                {gpu && (
+                  <SettingsRow
+                    label="Vulkan"
+                    description="GPU acceleration through Vulkan"
+                    control={<Badge variant={gpu.vulkan_ready ? "green" : "neutral"} size="sm">{gpu.vulkan_ready ? "Ready" : "Not available"}</Badge>}
+                  />
+                )}
+              </SettingsCard>
+            </>
+          )}
 
-              {/* Destination Authorization Model */}
-              <div className="p-4 rounded-lg bg-green-tint/40 border border-green-text/20 text-xs text-ink space-y-2">
-                <div className="flex items-center gap-2 font-semibold text-green-text">
-                  <Lock className="w-4 h-4 text-primary" />
-                  <span>Sovereign Provider Policy (Zero Silent Remote Failover)</span>
-                </div>
-                <p className="leading-relaxed">
-                  Active Selected Provider: <strong>{selectedProvider === "local" ? "Local Llama 3.2 3B (Offline)" : selectedProvider}</strong>. Credentials are saved exclusively in your OS Keychain (Apple Keychain / Windows Credential Manager / Secret Service).
-                </p>
-              </div>
-
-              <div className="space-y-4">
-                {/* Local llama-server */}
-                <div className="p-4 rounded-lg border border-border bg-surface flex items-center justify-between">
-                  <div>
-                    <h3 className="text-xs font-semibold text-ink">Local llama-server</h3>
-                    <p className="text-[11px] text-ink-muted mt-0.5">Private loopback inference, zero data leaves machine</p>
-                  </div>
-                  <Button
-                    variant={selectedProvider === "local" ? "primary" : "secondary"}
-                    size="sm"
-                    onClick={() => setSelectedProvider("local")}
-                  >
-                    {selectedProvider === "local" ? "Selected (Active)" : "Select"}
-                  </Button>
-                </div>
-
-                {/* OpenAI */}
-                <div className="p-4 rounded-lg border border-border bg-surface space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-xs font-semibold text-ink">OpenAI (ChatGPT / GPT-4o)</h3>
-                      <p className="text-[11px] text-ink-muted mt-0.5">Cloud API client, requires user API key</p>
-                    </div>
-                    <Button
-                      variant={selectedProvider === "openai" ? "primary" : "secondary"}
-                      size="sm"
-                      onClick={() => setSelectedProvider("openai")}
-                    >
-                      {selectedProvider === "openai" ? "Selected (Active)" : "Select"}
-                    </Button>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-mono text-ink-muted mb-1">
+          {/* PROVIDERS: REMOTE */}
+          {remoteSpec && (
+            <>
+              {policyCard}
+              <SettingsCard title={remoteSpec.label}>
+                <SettingsRow
+                  label={remoteSpec.label}
+                  description={remoteSpec.blurb}
+                  control={
+                    <>
+                      {configFor(remoteSpec.id)?.configured && <Badge variant="green" size="sm">Configured</Badge>}
+                      {selectButton(remoteSpec.id)}
+                    </>
+                  }
+                />
+                <SettingsRow label="Endpoint" description="Base URL requests are sent to">
+                  <input
+                    aria-label={`${remoteSpec.label} endpoint`}
+                    type="url"
+                    value={formValue(remoteSpec, "endpoint")}
+                    onChange={(e) => setForm(remoteSpec.id, { endpoint: e.target.value })}
+                    className={inputClass}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Model" description="Model identifier sent with each generation request">
+                  <input
+                    aria-label={`${remoteSpec.label} model`}
+                    type="text"
+                    value={formValue(remoteSpec, "model")}
+                    onChange={(e) => setForm(remoteSpec.id, { model: e.target.value })}
+                    placeholder="model name"
+                    className={inputClass}
+                  />
+                </SettingsRow>
+                {remoteSpec.needsKey && (
+                  <SettingsRow label="API Key" description="Stored in your operating-system keychain, never in plaintext">
+                    <label htmlFor={`${remoteSpec.id}-key`} className="block text-[11px] font-mono text-ink-muted mb-1.5">
                       API Key (Redacted)
                     </label>
                     <input
+                      id={`${remoteSpec.id}-key`}
                       type="password"
-                      value={openaiKey}
-                      onChange={(e) => setOpenaiKey(e.target.value)}
-                      placeholder="sk-proj-..."
-                      className="w-full h-8 px-2.5 rounded border border-border bg-surface-sunken text-xs font-mono text-ink"
+                      value={forms[remoteSpec.id]?.key ?? ""}
+                      onChange={(e) => setForm(remoteSpec.id, { key: e.target.value })}
+                      placeholder={remoteSpec.id === "openai" ? "sk-proj-..." : "API key"}
+                      className={inputClass}
                     />
-                  </div>
+                  </SettingsRow>
+                )}
+                <div className="py-3.5">
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={!openaiKey.trim()}
-                    onClick={() => {
-                      void configureProvider("openai", "gpt-4o-mini", "https://api.openai.com", true)
-                        .then(() => saveProviderApiKey("openai", openaiKey))
-                        .then(() => { setProviderMessage("OpenAI is configured in the operating-system keychain."); void queryClient.invalidateQueries({ queryKey: ["provider-configs"] }); })
-                        .catch((error: unknown) => setProviderMessage(error instanceof Error ? error.message : "Provider configuration failed."));
-                    }}
+                    disabled={
+                      !formValue(remoteSpec, "endpoint").trim() ||
+                      !formValue(remoteSpec, "model").trim() ||
+                      (remoteSpec.needsKey && !(forms[remoteSpec.id]?.key ?? "").trim())
+                    }
+                    onClick={() => saveRemote(remoteSpec)}
                   >
-                    Save keychain credential
+                    {remoteSpec.needsKey ? "Save keychain credential" : "Save configuration"}
                   </Button>
                 </div>
-                {providerMessage && <p role="status" className="text-xs text-green-text">{providerMessage}</p>}
-              </div>
-            </div>
+              </SettingsCard>
+              {providerMessage && <p role="status" className="px-2 text-xs text-green-text">{providerMessage}</p>}
+            </>
           )}
 
           {/* STORAGE */}
           {activeCategory === "storage" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-sm font-semibold text-ink">Storage Paths & Migration</h2>
-                <p className="text-xs text-ink-muted mt-1">
-                  Manage disk location for SQLite database, media files, and GGUF model weights.
-                </p>
-              </div>
-
-              <div className="p-4 rounded-lg border border-border bg-surface space-y-3 text-xs">
-                <div>
-                  <span className="text-ink-muted block text-[11px] uppercase font-mono">Current Meeting Storage Path</span>
-                  <span className="font-mono text-ink block mt-1 bg-surface-sunken p-2 rounded border border-border">
-                    {storage?.data_root ?? "Loading…"}
-                  </span>
+            <SettingsCard title="Storage Paths & Migration">
+              <SettingsRow
+                label="Meeting Storage"
+                description="SQLite database and media files."
+                control={<PathChip path={storage?.data_root ?? "Loading…"} />}
+              />
+              <SettingsRow
+                label="Models Storage"
+                description="GGUF model weights."
+                control={
+                  <>
+                    <PathChip path={storage?.models_root ?? "Loading…"} />
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        const target = window.prompt("Enter an empty directory for managed models");
+                        if (target) void migrateModels(target).then((message) => setProviderMessage(message)).catch((error: unknown) => setProviderMessage(error instanceof Error ? error.message : "Storage migration failed."));
+                      }}
+                    >
+                      Relocate Models…
+                    </Button>
+                  </>
+                }
+              />
+              {providerMessage && (
+                <div className="py-3">
+                  <p role="status" className="text-xs text-green-text">{providerMessage}</p>
                 </div>
-                <div>
-                  <span className="text-ink-muted block text-[11px] uppercase font-mono">Models Storage Path</span>
-                  <span className="font-mono text-ink block mt-1 bg-surface-sunken p-2 rounded border border-border">
-                    {storage?.models_root ?? "Loading…"}
-                  </span>
-                </div>
-                <div className="pt-2 flex justify-end">
-                  <Button variant="secondary" size="sm" onClick={() => {
-                    const target = window.prompt("Enter an empty directory for managed models");
-                    if (target) void migrateModels(target).then((message) => setProviderMessage(message)).catch((error: unknown) => setProviderMessage(error instanceof Error ? error.message : "Storage migration failed."));
-                  }}>
-                    Relocate Models…
-                  </Button>
-                </div>
-              </div>
-            </div>
+              )}
+            </SettingsCard>
           )}
 
           {/* PRIVACY */}
           {activeCategory === "privacy" && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-sm font-semibold text-ink">Privacy & Telemetry Audit</h2>
-                <p className="text-xs text-ink-muted mt-1">
-                  Locus is sovereign desktop software designed for confidential conversations.
-                </p>
-              </div>
-
-              <div className="space-y-3 text-xs">
-                <div className="p-3 rounded border border-border bg-surface flex items-center justify-between">
-                  <span className="font-medium text-ink">Application Analytics & Tracking</span>
-                  <Badge variant="green" size="sm">Disabled (0 bytes sent)</Badge>
-                </div>
-                <div className="p-3 rounded border border-border bg-surface flex items-center justify-between">
-                  <span className="font-medium text-ink">Crash Diagnostics Egress</span>
-                  <Badge variant="green" size="sm">Disabled (Local Logs Only)</Badge>
-                </div>
-                <div className="p-3 rounded border border-border bg-surface flex items-center justify-between">
-                  <span className="font-medium text-ink">Model Weight Hash Verification</span>
-                  <Badge variant="green" size="sm">SHA-256 Enforced</Badge>
-                </div>
-              </div>
-            </div>
+            <SettingsCard title="Privacy & Telemetry Audit">
+              <SettingsRow
+                label="Application Analytics & Tracking"
+                description="Locus is sovereign desktop software designed for confidential conversations."
+                control={<Badge variant="green" size="sm">Disabled (0 bytes sent)</Badge>}
+              />
+              <SettingsRow label="Crash Diagnostics Egress" control={<Badge variant="green" size="sm">Disabled (Local Logs Only)</Badge>} />
+              <SettingsRow label="Model Weight Hash Verification" control={<Badge variant="green" size="sm">SHA-256 Enforced</Badge>} />
+            </SettingsCard>
           )}
         </div>
       </div>

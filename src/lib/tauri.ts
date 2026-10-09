@@ -78,6 +78,21 @@ export interface ModelAssetDTO {
   disk_size: string;
   status: "bundled" | "installed" | "active" | "downloading" | "available" | "error";
   download_progress?: number;
+  // Optional catalog fields (e.g. from a GitHub-hosted models.json). The Model Manager renders each only when present.
+  author?: string;
+  description?: string;
+  downloads?: number;
+  tags?: string[];
+  /** Whether the model fits this machine's memory, when the catalog or hardware probe knows. */
+  fits?: boolean;
+  variants?: ModelVariantDTO[];
+}
+
+export interface ModelVariantDTO {
+  quantization: string;
+  disk_size: string;
+  memory_ram?: string;
+  url?: string;
 }
 
 export interface StorageInfoDTO {
@@ -645,6 +660,15 @@ const MOCK_MODELS: ModelAssetDTO[] = [
     memory_vram: "3.0 GB",
     disk_size: "2.0 GB",
     status: "active",
+    author: "Meta",
+    description: "A compact 3B instruction-tuned model that runs comfortably on CPU and is well suited to meeting summaries.",
+    downloads: 289502,
+    tags: ["Tools"],
+    fits: true,
+    variants: [
+      { quantization: "Q4_K_M", disk_size: "2.0 GB", memory_ram: "3.2 GB" },
+      { quantization: "Q8_0", disk_size: "3.4 GB", memory_ram: "4.6 GB" },
+    ],
   },
   {
     id: "mistral-7b-instruct",
@@ -656,6 +680,15 @@ const MOCK_MODELS: ModelAssetDTO[] = [
     memory_vram: "5.5 GB",
     disk_size: "4.3 GB",
     status: "available",
+    author: "Mistral AI",
+    description: "A 7B instruction model with stronger reasoning for long, technical meetings. Needs more memory.",
+    downloads: 25734,
+    tags: ["Tools", "Long context"],
+    fits: false,
+    variants: [
+      { quantization: "Q4_K_M", disk_size: "4.4 GB", memory_ram: "6.2 GB" },
+      { quantization: "Q5_K_M", disk_size: "5.1 GB", memory_ram: "7.0 GB" },
+    ],
   },
   {
     id: "bge-small-en",

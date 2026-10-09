@@ -28,14 +28,14 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({
       description="Locus detected an unfinalized session from a previous unexpected shutdown."
     >
       <div className="space-y-4 text-sm text-ink">
-        <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-md flex items-start gap-3 text-amber-800 dark:text-amber-200">
+        <div className="p-3.5 bg-amber-500/10 rounded-xl flex items-start gap-3 text-amber-800 dark:text-amber-200">
           <ShieldAlert className="w-5 h-5 shrink-0 mt-0.5 text-status-warning" />
           <p className="text-xs leading-relaxed">
             Durable media manifests preserved the captured segments. Crash recovery guarantees target lost tail ≤ 5 seconds.
           </p>
         </div>
 
-        <div className="bg-surface-sunken p-3 rounded border border-border grid grid-cols-2 gap-3 text-xs">
+        <div className="bg-surface-sunken p-3 rounded-xl grid grid-cols-2 gap-3 text-xs">
           <div>
             <span className="text-ink-muted block mb-0.5">Recorded At</span>
             <span className="font-medium text-ink flex items-center gap-1.5">
@@ -49,7 +49,7 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
+        <div className="flex items-center justify-end gap-3 pt-3">
           <Button variant="secondary" onClick={onDiscard}>
             Discard Recording
           </Button>

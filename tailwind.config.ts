@@ -11,6 +11,7 @@ export default {
           DEFAULT: "var(--color-surface)",
           elevated: "var(--color-surface-elevated)",
           sunken: "var(--color-surface-sunken)",
+          hover: "var(--color-surface-hover)",
         },
         border: {
           DEFAULT: "var(--color-border)",
@@ -26,6 +27,7 @@ export default {
           DEFAULT: "var(--color-primary)",
           hover: "var(--color-primary-hover)",
         },
+        "on-primary": "var(--color-on-primary)",
         accent: "var(--color-accent)",
         mint: "var(--color-mint)",
         "green-text": "var(--color-green-text)",

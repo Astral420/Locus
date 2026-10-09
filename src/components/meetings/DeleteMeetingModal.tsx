@@ -40,7 +40,7 @@ export const DeleteMeetingModal: React.FC<DeleteMeetingModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-lg border border-border bg-surface-elevated p-6 shadow-2xl space-y-4"
+        className="w-full max-w-md rounded-2xl border border-border bg-surface-elevated p-6 shadow-2xl space-y-4"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
@@ -59,13 +59,13 @@ export const DeleteMeetingModal: React.FC<DeleteMeetingModalProps> = ({
           </div>
         </div>
 
-        <div className="p-3 rounded-lg border border-status-error/20 bg-red-50/40 dark:bg-red-950/10 text-xs text-red-900 dark:text-red-200">
+        <div className="p-3 rounded-xl bg-status-error/10 text-xs text-red-900 dark:text-red-200">
           <p>
             This action immediately purges all captured audio, screen video segments, diarized transcripts, extracted slides, and summary revisions. Independent linked documents will be preserved.
           </p>
         </div>
 
-        <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+        <div className="flex items-center justify-end gap-2 pt-2">
           <Button variant="secondary" size="sm" onClick={onClose} disabled={isDeleting}>
             Cancel
           </Button>

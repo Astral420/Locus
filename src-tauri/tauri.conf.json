@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Locus", "width": 1200, "height": 760, "minWidth": 960, "minHeight": 640, "resizable": true }],
+    "windows": [{ "label": "main", "title": "Locus", "width": 1200, "height": 760, "minWidth": 960, "minHeight": 640, "resizable": true, "titleBarStyle": "Overlay", "hiddenTitle": true, "trafficLightPosition": { "x": 20, "y": 30 } }],
     "security": {
       "csp": null,
       "assetProtocol": { "enable": true, "scope": ["**/media/**"] }
