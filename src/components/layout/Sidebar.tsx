@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -11,15 +11,19 @@ import {
   PanelLeftOpen,
   Download,
   Plus,
+  MoreVertical,
+  Trash2,
 } from "lucide-react";
 import { useUiStore } from "../../stores/uiStore";
 import { useRecordingStore } from "../../stores/recordingStore";
 import { useKnowledgeStore } from "../../stores/knowledgeStore";
-import { listKnowledgeThreads, listModels, type KnowledgeThreadDTO, type ModelAssetDTO } from "../../lib/tauri";
+import { deleteKnowledgeThread, listKnowledgeThreads, listModels, type KnowledgeThreadDTO, type ModelAssetDTO } from "../../lib/tauri";
 import { KNOWLEDGE_SCOPE_LABELS, openKnowledgeThread } from "../../lib/knowledgeThreads";
 import { hasOverlayTitleBar } from "../../lib/platform";
 import { Kbd } from "../ui/Kbd";
 import { Popover } from "../ui/Popover";
+import { Modal } from "../ui/Modal";
+import { Button } from "../ui/Button";
 import { ProgressBar } from "../ui/ProgressBar";
 
 interface ActiveDownload {
@@ -103,6 +107,7 @@ const HiddenSidebarControls: React.FC = () => {
       role="toolbar"
       aria-label="Sidebar controls"
     >
+      <DownloadsButton />
       <button
         type="button"
         onClick={toggleSidebar}
@@ -112,8 +117,108 @@ const HiddenSidebarControls: React.FC = () => {
       >
         <PanelLeftOpen className="w-4 h-4" />
       </button>
-      <DownloadsButton />
     </div>
+  );
+};
+
+interface ConversationRowProps {
+  thread: KnowledgeThreadDTO;
+  isActive: boolean;
+  onOpen: () => void;
+  onRequestDelete: (thread: KnowledgeThreadDTO) => void;
+}
+
+/** One conversation: click to open, kebab (⋮) menu to delete. The menu is fixed-positioned so the scrolling list never clips it. */
+const ConversationRow: React.FC<ConversationRowProps> = ({ thread, isActive, onOpen, onRequestDelete }) => {
+  const [menu, setMenu] = useState<{ top: number; left: number } | null>(null);
+  const kebabRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setMenu(null);
+        kebabRef.current?.focus();
+      }
+    };
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (!menuRef.current?.contains(target) && !kebabRef.current?.contains(target)) setMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("resize", close);
+    document.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("resize", close);
+      document.removeEventListener("scroll", close, true);
+    };
+  }, [menu]);
+
+  const toggleMenu = () => {
+    if (menu) {
+      setMenu(null);
+      return;
+    }
+    const rect = kebabRef.current?.getBoundingClientRect();
+    setMenu({ top: (rect?.bottom ?? 0) + 4, left: Math.max(8, (rect?.right ?? 180) - 176) });
+  };
+
+  return (
+    <li className="group relative">
+      <button
+        type="button"
+        aria-current={isActive ? "true" : undefined}
+        onClick={onOpen}
+        className={`w-full text-left pl-2.5 pr-9 py-1.5 rounded-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+          isActive ? "bg-surface-hover text-ink" : "text-ink-muted hover:text-ink hover:bg-surface-hover/60"
+        }`}
+      >
+        <span className="block truncate text-[13px]">{thread.title}</span>
+        <span className="block truncate text-[11px] text-ink-subtle">
+          {KNOWLEDGE_SCOPE_LABELS[thread.scope]} · {thread.message_count} {thread.message_count === 1 ? "message" : "messages"}
+        </span>
+      </button>
+
+      <button
+        ref={kebabRef}
+        type="button"
+        aria-label="Conversation options"
+        aria-haspopup="menu"
+        aria-expanded={menu !== null}
+        onClick={toggleMenu}
+        className="absolute right-1.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center text-ink-muted hover:text-ink hover:bg-border opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 aria-expanded:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <MoreVertical className="w-3.5 h-3.5" />
+      </button>
+
+      {menu && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label="Conversation options"
+          style={{ top: menu.top, left: menu.left }}
+          className="fixed z-50 w-44 rounded-xl border border-border bg-surface-elevated p-1 shadow-xl"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMenu(null);
+              onRequestDelete(thread);
+            }}
+            className="w-full h-8 px-2.5 rounded-lg flex items-center gap-2 text-[13px] text-status-error hover:bg-status-error/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Delete conversation
+          </button>
+        </div>
+      )}
+    </li>
   );
 };
 
@@ -127,6 +232,10 @@ const ConversationList: React.FC<{ currentPath: string }> = ({ currentPath }) =>
     queryFn: listKnowledgeThreads,
   });
 
+  const [pendingDelete, setPendingDelete] = useState<KnowledgeThreadDTO | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   const onKnowledge = currentPath === "/knowledge" || currentPath.startsWith("/knowledge/");
   const effectiveId = selectedThreadId ?? threads[0]?.id ?? null;
 
@@ -134,6 +243,30 @@ const ConversationList: React.FC<{ currentPath: string }> = ({ currentPath }) =>
     void openKnowledgeThread(queryClient, threads, "all_meetings", null)
       .then(() => navigate({ to: "/knowledge" }))
       .catch(() => undefined);
+  };
+
+  const closeDeleteDialog = () => {
+    if (isDeleting) return;
+    setPendingDelete(null);
+    setDeleteError(null);
+  };
+
+  const confirmDelete = () => {
+    if (!pendingDelete) return;
+    const target = pendingDelete;
+    setIsDeleting(true);
+    setDeleteError(null);
+    deleteKnowledgeThread(target.id)
+      .then(async () => {
+        if (useKnowledgeStore.getState().selectedThreadId === target.id) setSelectedThreadId(null);
+        queryClient.removeQueries({ queryKey: ["knowledgeMessages", target.id] });
+        await queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
+        setPendingDelete(null);
+      })
+      .catch((error: unknown) => {
+        setDeleteError(error instanceof Error ? error.message : typeof error === "string" ? error : "The conversation could not be deleted.");
+      })
+      .finally(() => setIsDeleting(false));
   };
 
   return (
@@ -154,30 +287,45 @@ const ConversationList: React.FC<{ currentPath: string }> = ({ currentPath }) =>
       {/* The list scrolls inside the sidebar; the navigation above it stays fixed. */}
       <ul className="flex-1 min-h-0 overflow-y-auto space-y-0.5 pb-2" aria-label="Conversation history">
         {threads.length === 0 && <li className="px-2.5 py-1.5 text-xs text-ink-subtle">No conversations yet</li>}
-        {threads.map((thread) => {
-          const isActive = onKnowledge && thread.id === effectiveId;
-          return (
-            <li key={thread.id}>
-              <button
-                type="button"
-                aria-current={isActive ? "true" : undefined}
-                onClick={() => {
-                  setSelectedThreadId(thread.id);
-                  void navigate({ to: "/knowledge" });
-                }}
-                className={`w-full text-left px-2.5 py-1.5 rounded-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                  isActive ? "bg-surface-hover text-ink" : "text-ink-muted hover:text-ink hover:bg-surface-hover/60"
-                }`}
-              >
-                <span className="block truncate text-[13px]">{thread.title}</span>
-                <span className="block truncate text-[11px] text-ink-subtle">
-                  {KNOWLEDGE_SCOPE_LABELS[thread.scope]} · {thread.message_count} {thread.message_count === 1 ? "message" : "messages"}
-                </span>
-              </button>
-            </li>
-          );
-        })}
+        {threads.map((thread) => (
+          <ConversationRow
+            key={thread.id}
+            thread={thread}
+            isActive={onKnowledge && thread.id === effectiveId}
+            onOpen={() => {
+              setSelectedThreadId(thread.id);
+              void navigate({ to: "/knowledge" });
+            }}
+            onRequestDelete={setPendingDelete}
+          />
+        ))}
       </ul>
+
+      <Modal
+        isOpen={pendingDelete !== null}
+        onClose={closeDeleteDialog}
+        title="Delete conversation?"
+        description={
+          pendingDelete
+            ? `“${pendingDelete.title}” and its ${pendingDelete.message_count} ${pendingDelete.message_count === 1 ? "message" : "messages"} will be permanently deleted. Your meetings and documents are not affected.`
+            : undefined
+        }
+      >
+        {deleteError && (
+          <p role="alert" className="mb-3 rounded-xl bg-status-error/10 px-3 py-2 text-xs text-status-error">
+            {deleteError}
+          </p>
+        )}
+        <div className="flex items-center justify-end gap-2">
+          <Button variant="secondary" size="sm" onClick={closeDeleteDialog} disabled={isDeleting}>
+            Cancel
+          </Button>
+          <Button variant="danger" size="sm" onClick={confirmDelete} isLoading={isDeleting}>
+            <Trash2 className="w-3.5 h-3.5" />
+            Delete
+          </Button>
+        </div>
+      </Modal>
     </section>
   );
 };

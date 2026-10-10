@@ -926,8 +926,23 @@ export function checkForUpdate(endpoint?: string, currentVersion = "0.1.0"): Pro
   }));
 }
 
+let mockThreads = [...MOCK_THREADS];
+
 export function listKnowledgeThreads(): Promise<KnowledgeThreadDTO[]> {
-  return safeInvoke("list_knowledge_threads", undefined, () => MOCK_THREADS);
+  return safeInvoke("list_knowledge_threads", undefined, () => mockThreads);
+}
+
+/**
+ * Permanently delete a conversation and its messages. Inside Tauri this always goes to the backend and surfaces its
+ * errors (no mock fallback, so a failed delete can never look successful); in browser preview it edits the mock list.
+ */
+export async function deleteKnowledgeThread(threadId: string): Promise<void> {
+  if (isTauriEnvironment()) {
+    await invoke<void>("delete_knowledge_thread", { threadId });
+    return;
+  }
+  mockThreads = mockThreads.filter((thread) => thread.id !== threadId);
+  mockKnowledgeMessages = mockKnowledgeMessages.filter((message) => message.thread_id !== threadId);
 }
 
 export function listDocuments(): Promise<DocumentDTO[]> {

@@ -829,6 +829,23 @@ impl KnowledgeService {
             .map_err(|error| error.to_string())
     }
 
+    /// Delete one conversation. Its messages, citations and message dependencies are removed by the
+    /// `ON DELETE CASCADE` foreign keys; documents and meetings are never touched.
+    pub fn delete_thread(&self, thread_id: &str) -> Result<(), String> {
+        let thread_id = thread_id.to_owned();
+        self.database
+            .run(move |connection| {
+                let deleted = connection
+                    .execute("DELETE FROM chat_threads WHERE id=?1", (&thread_id,))
+                    .map_err(|error| error.to_string())?;
+                if deleted == 0 {
+                    return Err("Conversation not found".to_string());
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())
+    }
+
     pub fn list_messages(&self, thread_id: &str) -> Result<Vec<KnowledgeMessageDto>, String> {
         let thread_id = thread_id.to_owned();
         self.database

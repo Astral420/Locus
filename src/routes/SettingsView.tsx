@@ -63,7 +63,7 @@ export const SettingsContent: React.FC = () => {
   ] as const;
 
   const inputClass =
-    "w-full h-9 px-3 rounded-lg border border-border bg-bg text-xs font-mono text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+    "w-full max-w-[640px] h-9 px-3 rounded-lg border border-border bg-bg text-xs font-mono text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
   const configFor = (id: ProviderId) => providerConfigs.find((c) => c.provider === id);
   const providerLabel = (id: ProviderId) =>
@@ -186,7 +186,7 @@ export const SettingsContent: React.FC = () => {
         </nav>
 
         {/* Grouped cards */}
-        <div className="flex-1 min-w-0 max-w-[720px] overflow-y-auto space-y-3">
+        <div className="flex-1 min-w-0 overflow-y-auto space-y-3">
           {/* GENERAL */}
           {activeCategory === "general" && (
             <SettingsCard title="General">
@@ -194,11 +194,6 @@ export const SettingsContent: React.FC = () => {
                 label="Configured providers"
                 description="Locus keeps capture local by default and never enables a remote destination implicitly."
                 control={<span className="text-sm font-medium text-ink nums-tabular">{providerConfigs.filter((config) => config.configured).length}</span>}
-              />
-              <SettingsRow
-                label="Automatic telemetry"
-                description="Nothing is sent from this device."
-                control={<Badge variant="green" size="sm">Disabled</Badge>}
               />
               <SettingsRow
                 label="Updates"

@@ -223,9 +223,9 @@ export const MeetingDetailContent: React.FC = () => {
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-bg">
       {/* Precision Master Control Studio Header Bar (DESIGN.md §4.2) */}
-      <div className={`px-6 pt-1 pb-3 ${hiddenSidebarInset(sidebarHidden)}`}>
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+      <div className={`px-6 pt-4 pb-3 ${hiddenSidebarInset(sidebarHidden)}`}>
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+          <div className="flex items-center gap-3 min-w-0 flex-1 basis-[260px]">
             <button
               type="button"
               onClick={() => void navigate({ to: "/" })}
@@ -234,14 +234,14 @@ export const MeetingDetailContent: React.FC = () => {
             >
               <ChevronLeft className="w-5 h-5" />
             </button>
-            <div>
-              <h1 className="text-base font-semibold text-ink tracking-tight flex items-center gap-2 flex-wrap">
-                <span>{meeting.title}</span>
-                <Badge variant="green" size="sm">
+            <div className="min-w-0">
+              <h1 className="text-base font-semibold text-ink tracking-tight flex items-center gap-2 min-w-0">
+                <span className="truncate" title={meeting.title}>{meeting.title}</span>
+                <Badge variant="green" size="sm" className="shrink-0">
                   {meeting.detected_type || meeting.requested_type}
                 </Badge>
               </h1>
-              <div className="flex items-center gap-3 text-xs text-ink-muted mt-0.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-ink-muted mt-0.5 whitespace-nowrap">
                 <span className="flex items-center gap-1 font-mono">
                   <Clock className="w-3 h-3" />
                   {formatTime(meeting.duration_seconds)}
@@ -264,7 +264,7 @@ export const MeetingDetailContent: React.FC = () => {
           </div>
 
           {/* Header Action Tools */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 shrink-0">
             {/* Pipeline Status Trigger Badge (Task M8.07) */}
             <PipelineStatusBadge
               statusList={pipelineStatus}
@@ -298,9 +298,9 @@ export const MeetingDetailContent: React.FC = () => {
       </div>
 
       {/* Main Split View: Media Player & Slide Strip (Left) | Tabs Studio (Right) */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 px-6 pb-6 overflow-hidden">
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 auto-rows-min lg:auto-rows-auto gap-4 px-6 pb-6 overflow-y-auto lg:overflow-hidden">
         {/* Left Column (5/12 cols): Video Player + Auto-extracted Slides Strip */}
-        <div className="lg:col-span-6 xl:col-span-5 p-4 rounded-2xl bg-surface flex flex-col gap-4 overflow-y-auto">
+        <div className="lg:col-span-6 xl:col-span-5 p-4 rounded-2xl bg-surface flex flex-col gap-4 lg:min-h-0 lg:overflow-y-auto">
           {/* Synchronized Media Player (Task M8.01) */}
           <MediaPlayer
             src={media?.path ?? undefined}
@@ -323,7 +323,7 @@ export const MeetingDetailContent: React.FC = () => {
         </div>
 
         {/* Right Column (7/12 cols): Tabbed Studio Workspace */}
-        <div className="lg:col-span-6 xl:col-span-7 flex flex-col min-h-0 rounded-2xl bg-surface">
+        <div className="lg:col-span-6 xl:col-span-7 flex flex-col min-h-[34rem] lg:min-h-0 rounded-2xl bg-surface">
           {/* Tab Navigation Header (DESIGN.md §4.2) */}
           <div className="h-14 flex items-center px-4 gap-1 shrink-0 overflow-x-auto">
             <button
@@ -335,7 +335,7 @@ export const MeetingDetailContent: React.FC = () => {
                   : "text-ink-muted hover:text-ink"
               }`}
             >
-              <FileText className="w-3.5 h-3.5" />
+              <FileText className="w-3.5 h-3.5 lg:max-xl:hidden" />
               Summary
             </button>
 
@@ -348,7 +348,7 @@ export const MeetingDetailContent: React.FC = () => {
                   : "text-ink-muted hover:text-ink"
               }`}
             >
-              <Clock className="w-3.5 h-3.5" />
+              <Clock className="w-3.5 h-3.5 lg:max-xl:hidden" />
               Transcript
             </button>
 
@@ -361,7 +361,7 @@ export const MeetingDetailContent: React.FC = () => {
                   : "text-ink-muted hover:text-ink"
               }`}
             >
-              <CheckSquare className="w-3.5 h-3.5" />
+              <CheckSquare className="w-3.5 h-3.5 lg:max-xl:hidden" />
               <span>Action Items</span>
               {pendingActionsCount > 0 && (
                 <span className="ml-1 px-1.5 py-0.2 rounded-full bg-primary text-on-primary text-[10px] font-mono font-bold">
@@ -379,7 +379,7 @@ export const MeetingDetailContent: React.FC = () => {
                   : "text-ink-muted hover:text-ink"
               }`}
             >
-              <Images className="w-3.5 h-3.5" />
+              <Images className="w-3.5 h-3.5 lg:max-xl:hidden" />
               <span>Slides</span>
               {slides.length > 0 && hasVideo && (
                 <span className="ml-1 text-[10px] font-mono text-ink-muted">({slides.length})</span>
@@ -395,7 +395,7 @@ export const MeetingDetailContent: React.FC = () => {
                   : "text-ink-muted hover:text-ink"
               }`}
             >
-              <MessageSquare className="w-3.5 h-3.5" />
+              <MessageSquare className="w-3.5 h-3.5 lg:max-xl:hidden" />
               Chat
             </button>
           </div>

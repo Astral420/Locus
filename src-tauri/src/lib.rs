@@ -134,6 +134,7 @@ pub fn run() {
             commands::knowledge::unlink_document,
             commands::knowledge::create_knowledge_thread,
             commands::knowledge::list_knowledge_threads,
+            commands::knowledge::delete_knowledge_thread,
             commands::knowledge::list_knowledge_messages,
             commands::knowledge::search_knowledge,
             commands::knowledge::send_knowledge_message,

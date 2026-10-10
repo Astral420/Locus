@@ -22,7 +22,7 @@ import {
   type KnowledgeSearchResultDTO,
   type KnowledgeThreadDTO,
 } from "../lib/tauri";
-import { BookOpen, CheckCircle2, ChevronRight, FileText, LoaderCircle, Search, Send, ShieldCheck, Square, Upload } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronDown, FileText, LoaderCircle, Search, Send, ShieldCheck, Square, Upload } from "lucide-react";
 import { KNOWLEDGE_SCOPE_LABELS, openKnowledgeThread } from "../lib/knowledgeThreads";
 import { useKnowledgeStore } from "../stores/knowledgeStore";
 
@@ -38,6 +38,73 @@ function citationLabel(citation: KnowledgeMessageDTO["citations"][number]): stri
   return citation.source_title;
 }
 
+function messageTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+/** Messaging-style bubble: user on the right (compact, neutral), assistant on the left (card with collapsible sources). */
+const MessageBubble: React.FC<{ message: KnowledgeMessageDTO }> = ({ message }) => {
+  const [showSources, setShowSources] = useState(true);
+  const time = messageTime(message.created_at);
+
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end" data-role="user">
+        <div className="w-fit max-w-[75%] rounded-2xl rounded-br-md bg-surface-hover px-4 py-2.5 text-sm leading-relaxed text-ink">
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+          {time && <span className="mt-1 block text-right text-[11px] text-ink-subtle">{time}</span>}
+        </div>
+      </div>
+    );
+  }
+
+  const citations = message.citations;
+  return (
+    <div className="flex justify-start" data-role="assistant">
+      <div className="w-fit max-w-[88%] rounded-2xl rounded-bl-md bg-surface px-4 py-3 text-sm leading-relaxed text-ink">
+        <p className={"whitespace-pre-wrap break-words" + (message.content ? "" : " text-ink-muted animate-pulse")}>
+          {message.content || (message.state === "pending" ? "Thinking…" : "")}
+        </p>
+        {message.state === "canceled" && <p className="mt-2 text-[11px] text-status-warning">[Incomplete Response]</p>}
+
+        {citations.length > 0 && (
+          <div className="mt-3 space-y-2">
+            <button
+              type="button"
+              aria-expanded={showSources}
+              onClick={() => setShowSources((v) => !v)}
+              className="flex w-full items-center justify-between gap-6 rounded-xl bg-bg px-3 py-2 text-xs font-medium text-ink-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <span className="inline-flex items-center gap-2">
+                <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                Sources ({citations.length})
+              </span>
+              <ChevronDown className={"h-3.5 w-3.5 transition-transform " + (showSources ? "rotate-180" : "")} aria-hidden="true" />
+            </button>
+            {showSources && (
+              <div className="flex flex-wrap gap-2">
+                {citations.map((citation) => (
+                  <button
+                    key={citation.id}
+                    type="button"
+                    title="Citation location"
+                    className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-bg px-3 py-1 text-[11px] text-primary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  >
+                    <span className="truncate">{citationLabel(citation)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {time && <span className="mt-2 block text-[11px] text-ink-subtle">{time}</span>}
+      </div>
+    </div>
+  );
+};
+
 export const KnowledgeContent: React.FC = () => {
   const queryClient = useQueryClient();
   const selectedThreadId = useKnowledgeStore((s) => s.selectedThreadId);
@@ -50,6 +117,7 @@ export const KnowledgeContent: React.FC = () => {
   const [localMessages, setLocalMessages] = useState<KnowledgeMessageDTO[]>([]);
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const { data: threads, isLoading: loadingThreads } = useQuery<KnowledgeThreadDTO[]>({
     queryKey: ["knowledgeThreads"],
@@ -89,6 +157,12 @@ export const KnowledgeContent: React.FC = () => {
   useEffect(() => () => {
     if (timer.current !== null) window.clearInterval(timer.current);
   }, []);
+  // Chat-style: keep the newest message (and streaming text) in view.
+  const lastMessageLength = messages[messages.length - 1]?.content.length ?? 0;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, lastMessageLength, activeThreadId]);
 
   const newThread = async (nextScope: KnowledgeScope) => {
     const meetingId = nextScope === "this_meeting" ? selectedThread?.meeting_id : null;
@@ -142,6 +216,7 @@ export const KnowledgeContent: React.FC = () => {
     }));
     try {
       const answer = await sendKnowledgeMessage(threadId, query);
+      void queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
       setLocalMessages((current) => current.concat({ ...answer, content: "" }));
       setStreamingId(answer.id);
       let offset = 0;
@@ -224,8 +299,10 @@ export const KnowledgeContent: React.FC = () => {
               </select>
             </label>
           </div>
-          <div className="flex-1 py-4 overflow-y-auto space-y-4" aria-live="polite">
-            {messages.length === 0 ? <EmptyState icon={<BookOpen className="w-8 h-8 text-primary" />} title="Start a Knowledge inquiry" description="Ask about decisions, concepts, or deadlines in the selected scope." actionLabel="Summarize recent decisions" onAction={() => setInputQuery("Summarize the key decisions from the selected sources.")} /> : messages.map((message) => <div key={message.id} className={"p-4 rounded-2xl max-w-3xl text-sm leading-relaxed " + (message.role === "user" ? "ml-auto bg-primary text-on-primary font-medium" : "mr-auto bg-surface text-ink")}><p className="whitespace-pre-wrap">{message.content || (message.state === "pending" ? "Thinking…" : "")}</p>{message.state === "canceled" && <p className="mt-2 text-[11px] text-status-warning">[Incomplete Response]</p>}{message.citations.length > 0 && <div className="mt-3 pt-2.5 border-t border-border/40 space-y-1"><span className="font-semibold text-[11px] uppercase tracking-wider text-ink-muted block">Sources</span>{message.citations.map((citation) => <button key={citation.id} type="button" className="flex items-center gap-1.5 text-[11px] text-primary hover:underline" title="Citation location"><ChevronRight className="w-3 h-3" />{citationLabel(citation)}</button>)}</div>}</div>)}
+          <div ref={scrollRef} className="flex-1 overflow-y-auto" aria-live="polite">
+            <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 py-4 pr-1">
+              {messages.length === 0 ? <EmptyState icon={<BookOpen className="w-8 h-8 text-primary" />} title="Start a Knowledge inquiry" description="Ask about decisions, concepts, or deadlines in the selected scope." actionLabel="Summarize recent decisions" onAction={() => setInputQuery("Summarize the key decisions from the selected sources.")} /> : messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+            </div>
           </div>
           <div className="pt-2"><form onSubmit={send} className="flex items-center gap-3 max-w-3xl mx-auto rounded-3xl border border-border bg-surface pl-5 pr-2.5 py-2"><input aria-label="Knowledge question" type="text" value={inputQuery} onChange={(event) => setInputQuery(event.target.value)} placeholder="Ask a question about your local sources…" className="flex-1 h-9 bg-transparent text-sm text-ink placeholder:text-ink-subtle focus-visible:outline-none" />{streamingId ? <Button variant="secondary" size="sm" type="button" onClick={cancel}><Square className="w-3.5 h-3.5" />Stop</Button> : <Button variant="primary" size="icon" type="submit" aria-label="Send" title="Send" disabled={!inputQuery.trim()}><Send className="w-4 h-4" /></Button>}</form><p className="max-w-3xl mx-auto mt-2 text-[10px] text-ink-muted">Responses are grounded in retrieved sources. The selected destination is shown before dispatch.</p></div>
         </main>

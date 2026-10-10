@@ -550,11 +550,11 @@ describe("M8.08: Meetings List View & Delete Confirmation", () => {
 
     // Modal should appear
     expect(screen.getByRole("dialog", { name: /delete meeting/i })).toBeDefined();
-    expect(screen.getByText("Delete Meeting Record")).toBeDefined();
-    expect(screen.getByText(/Are you sure you want to permanently delete/i)).toBeDefined();
+    expect(screen.getByText("Delete meeting?")).toBeDefined();
+    expect(screen.getByText(/will be permanently deleted/i)).toBeDefined();
 
     // Confirm deletion
-    const confirmDeleteBtn = screen.getByRole("button", { name: "Delete Meeting" });
+    const confirmDeleteBtn = screen.getByRole("button", { name: "Delete" });
     fireEvent.click(confirmDeleteBtn);
 
     await waitFor(() => {

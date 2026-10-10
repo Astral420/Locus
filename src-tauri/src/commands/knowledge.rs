@@ -109,6 +109,14 @@ pub fn list_knowledge_threads(
 }
 
 #[tauri::command]
+pub fn delete_knowledge_thread(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<(), String> {
+    state.knowledge.delete_thread(&thread_id)
+}
+
+#[tauri::command]
 pub fn list_knowledge_messages(
     state: State<'_, AppState>,
     thread_id: String,
