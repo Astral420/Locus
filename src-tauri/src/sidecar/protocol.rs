@@ -51,6 +51,10 @@ pub struct RpcNotification {
     pub params: Value,
 }
 
+/// JSON-RPC code the sidecar uses for "this install cannot do that" (missing
+/// optional package, binary or model). It is not a failure of the work itself.
+pub const CAPABILITY_UNAVAILABLE_CODE: i64 = -32001;
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("frame is not valid UTF-8: {0}")]

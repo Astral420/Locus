@@ -92,6 +92,12 @@ impl SidecarClient {
         self.timeout = timeout;
         self
     }
+    /// Per-call frame timeout. Long-running work (VAD, diarization, slide
+    /// detection over a multi-hour recording) needs far more than the 10 s
+    /// default, which is sized for handshakes and health checks.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
     pub fn handshake(&mut self) -> Result<Handshake, SidecarError> {
         self.call("handshake", serde_json::json!({}))
     }

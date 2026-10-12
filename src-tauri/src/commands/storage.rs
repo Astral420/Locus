@@ -18,7 +18,7 @@ pub fn migrate_models(state: State<'_, AppState>, target_path: String) -> Result
     );
     let result = state
         .storage
-        .migrate_models(target_path, capture_active, true)
+        .migrate_models(target_path, capture_active, !state.executor.is_busy())
         .map_err(|e| e.to_string())?;
     Ok(format!(
         "{}; originals retained for optional cleanup",
@@ -34,7 +34,7 @@ pub fn relocate_storage(state: State<'_, AppState>, target_path: String) -> Resu
     );
     let result = state
         .storage
-        .relocate_data(target_path, capture_active, true)
+        .relocate_data(target_path, capture_active, !state.executor.is_busy())
         .map_err(|e| e.to_string())?;
     Ok(format!(
         "{}; restart is required before writable stores switch",

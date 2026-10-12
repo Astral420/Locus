@@ -671,7 +671,9 @@ impl SummarizationService {
         route: &super::prompts::PromptRoute,
         context: &SummaryContext,
     ) -> Result<String, String> {
-        let job_id = Uuid::new_v4().to_string();
+        // One row per meeting, shared with the pipeline queue, so the UI shows a
+        // single "summarization" step instead of an extra entry per attempt.
+        let job_id = format!("pipeline:{meeting_id}:summarization");
         let meeting_id = meeting_id.to_owned();
         let config_snapshot = serde_json::json!({
             "provider": snapshot,
@@ -685,7 +687,7 @@ impl SummarizationService {
                 let now = Utc::now().to_rfc3339();
                 connection
                     .execute(
-                        "INSERT INTO jobs(id, meeting_id, kind, state, source_revision, config_snapshot, resource_class, created_at, updated_at) VALUES (?1, ?2, 'summarization', 'running', ?3, ?4, 'background', ?5, ?5)",
+                        "INSERT INTO jobs(id, meeting_id, kind, state, source_revision, config_snapshot, resource_class, created_at, updated_at) VALUES (?1, ?2, 'summarization', 'running', ?3, ?4, 'inference', ?5, ?5) ON CONFLICT(id) DO UPDATE SET state='running', reason=NULL, progress=0, source_revision=excluded.source_revision, updated_at=excluded.updated_at",
                         (&job_id, &meeting_id, &transcript_revision_id, &config_snapshot, &now),
                     )
                     .map(|_| job_id)

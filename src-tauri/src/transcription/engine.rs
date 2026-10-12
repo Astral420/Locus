@@ -5,6 +5,7 @@ use std::process::Command;
 use thiserror::Error;
 use whisper_rs::{
     get_lang_str, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
+    WhisperState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,9 +125,70 @@ pub enum TranscriptionError {
     EmptyAudio,
 }
 
+/// Environment override for GPU use: `1`/`true` forces it, `0`/`false` forbids it.
+pub const ENV_WHISPER_GPU: &str = "LOCUS_WHISPER_GPU";
+
+/// Whether whisper.cpp may use a GPU. `detect_backend()` is the product's
+/// decision (Intel Macs run on CPU); the old code ignored it and let whisper.cpp
+/// pick Metal on an AMD GPU by default, where ggml's Metal backend is known to
+/// produce garbage output. The override exists for experiments only.
+pub fn decide_gpu(backend: BackendKind, env_override: Option<&str>) -> bool {
+    match env_override.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => backend != BackendKind::Cpu,
+    }
+}
+
+fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .clamp(1, 8)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LanguageGuess {
+    pub language: String,
+    pub probability: f32,
+    pub runner_up: Option<(String, f32)>,
+}
+
+/// Averages per-clip language probability vectors (clips of different length
+/// are weighted equally; one noisy clip must not decide for the whole meeting).
+pub fn average_language_probs(all: &[Vec<f32>]) -> Vec<f32> {
+    let width = all.iter().map(Vec::len).max().unwrap_or(0);
+    let mut average = vec![0.0_f32; width];
+    for probs in all {
+        for (slot, value) in average.iter_mut().zip(probs) {
+            *slot += value;
+        }
+    }
+    let count = all.len().max(1) as f32;
+    average.iter_mut().for_each(|value| *value /= count);
+    average
+}
+
+pub fn top_languages(average: &[f32]) -> Option<LanguageGuess> {
+    let mut ranked: Vec<(usize, f32)> = average.iter().copied().enumerate().collect();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let name = |index: usize| get_lang_str(index as i32).map(str::to_owned);
+    let (best, probability) = *ranked.first()?;
+    Some(LanguageGuess {
+        language: name(best)?,
+        probability,
+        runner_up: ranked
+            .get(1)
+            .and_then(|(index, value)| name(*index).map(|language| (language, *value))),
+    })
+}
+
 pub struct WhisperEngine {
+    #[allow(dead_code)]
     context: WhisperContext,
+    state: WhisperState,
     pub backend: BackendKind,
+    pub gpu: bool,
 }
 
 impl WhisperEngine {
@@ -135,9 +197,56 @@ impl WhisperEngine {
         if backend == BackendKind::Vulkan {
             apply_vulkan_environment();
         }
-        WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-            .map(|context| Self { context, backend })
-            .map_err(|error| TranscriptionError::Model(error.to_string()))
+        let gpu = decide_gpu(backend, std::env::var(ENV_WHISPER_GPU).ok().as_deref());
+        let mut parameters = WhisperContextParameters::default();
+        parameters.use_gpu(gpu);
+        let context = WhisperContext::new_with_params(model_path, parameters)
+            .map_err(|error| TranscriptionError::Model(error.to_string()))?;
+        // One state for the whole job: re-creating it per chunk re-allocated
+        // every compute buffer (and recompiled GPU kernels) each time.
+        let state = context
+            .create_state()
+            .map_err(|error| TranscriptionError::Model(error.to_string()))?;
+        Ok(Self {
+            context,
+            state,
+            backend,
+            gpu,
+        })
+    }
+
+    /// What actually runs the model, for job notes and logs.
+    pub fn device_label(&self) -> String {
+        if self.gpu {
+            format!("{:?} GPU", self.backend)
+        } else {
+            "CPU".into()
+        }
+    }
+
+    /// Detects the language once from several clips (each up to 30 s of 16 kHz
+    /// mono audio), so a short noisy chunk cannot flip the language.
+    pub fn detect_language(
+        &mut self,
+        clips: &[Vec<f32>],
+    ) -> Result<Option<LanguageGuess>, TranscriptionError> {
+        let threads = worker_threads();
+        let mut all = Vec::new();
+        for clip in clips {
+            if clip.len() < 16_000 {
+                continue;
+            }
+            let clip = &clip[..clip.len().min(30 * 16_000)];
+            self.state
+                .pcm_to_mel(clip, threads)
+                .map_err(|error| TranscriptionError::Inference(error.to_string()))?;
+            let (_, probabilities) = self
+                .state
+                .lang_detect(0, threads)
+                .map_err(|error| TranscriptionError::Inference(error.to_string()))?;
+            all.push(probabilities);
+        }
+        Ok(top_languages(&average_language_probs(&all)))
     }
 
     pub fn transcribe_chunk(
@@ -149,11 +258,10 @@ impl WhisperEngine {
         if audio.is_empty() {
             return Err(TranscriptionError::EmptyAudio);
         }
-        let mut state = self
-            .context
-            .create_state()
-            .map_err(|e| TranscriptionError::Inference(e.to_string()))?;
+        let state = &mut self.state;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(worker_threads() as i32);
+        params.set_suppress_nst(true);
         params.set_language(language);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -215,6 +323,36 @@ fn normalize_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intel_mac_style_cpu_decision_is_respected_unless_overridden() {
+        assert!(!decide_gpu(BackendKind::Cpu, None));
+        assert!(decide_gpu(BackendKind::Metal, None));
+        assert!(decide_gpu(BackendKind::Cuda, None));
+        assert!(decide_gpu(BackendKind::Cpu, Some("1")));
+        assert!(decide_gpu(BackendKind::Cpu, Some(" TRUE ")));
+        assert!(!decide_gpu(BackendKind::Metal, Some("0")));
+        assert!(!decide_gpu(BackendKind::Metal, Some("off")));
+        assert!(!decide_gpu(BackendKind::Cpu, Some("maybe")));
+        assert!(decide_gpu(BackendKind::Metal, Some("maybe")));
+    }
+
+    #[test]
+    fn language_is_decided_across_clips_not_by_one_noisy_clip() {
+        // id 0 = en, id 1 = zh in whisper's table; two clips agree, one is noise.
+        let mut english = vec![0.0; 99];
+        english[0] = 0.8;
+        english[1] = 0.1;
+        let mut noisy = vec![0.0; 99];
+        noisy[1] = 0.4;
+        noisy[0] = 0.3;
+        let average = average_language_probs(&[english.clone(), english, noisy]);
+        let guess = top_languages(&average).unwrap();
+        assert_eq!(guess.language, "en");
+        assert!(guess.probability > 0.6);
+        assert_eq!(guess.runner_up.unwrap().0, "zh");
+        assert!(top_languages(&[]).is_none());
+    }
 
     #[test]
     fn duplicate_boundary_segments_are_collapsed() {

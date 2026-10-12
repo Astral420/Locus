@@ -63,7 +63,7 @@ pub async fn recover_capture(
     let root = state.media_root.clone();
     let database = state.database.clone();
     let pipeline = state.pipeline.clone();
-    blocking(move || {
+    let result = blocking(move || {
         let ffmpeg = crate::capture::screen::locate_ffmpeg().ok_or_else(|| {
             "FFmpeg was not found, so the recording cannot be rebuilt.".to_string()
         })?;
@@ -75,7 +75,9 @@ pub async fn recover_capture(
         )?;
         Ok(outcome)
     })
-    .await
+    .await;
+    state.executor.notify();
+    result
 }
 
 /// Displays and windows the native backend can record, for the source picker
@@ -148,7 +150,7 @@ pub async fn resume_recording(state: State<'_, AppState>) -> Result<RecordingSta
 pub async fn stop_recording(state: State<'_, AppState>) -> Result<RecordingStateDto, String> {
     let capture = state.capture.clone();
     let pipeline = state.pipeline.clone();
-    blocking(move || {
+    let result = blocking(move || {
         capture
             .transition(CaptureLifecycle::Finalizing)
             .map_err(|e| e.to_string())?;
@@ -163,5 +165,7 @@ pub async fn stop_recording(state: State<'_, AppState>) -> Result<RecordingState
         }
         Ok(result)
     })
-    .await
+    .await;
+    state.executor.notify();
+    result
 }

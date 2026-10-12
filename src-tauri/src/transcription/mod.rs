@@ -36,35 +36,45 @@ impl TranscriptionService {
         Self { database }
     }
 
+    /// Status comes from the durable pipeline job, not from whether a language
+    /// happens to be recorded.
     pub fn status(&self, meeting_id: &str) -> Result<TranscriptionStatus, String> {
         let meeting_id = meeting_id.to_owned();
         self.database
             .run(move |connection| {
-                connection
+                let (selected, detected): (Option<String>, Option<String>) = connection
                     .query_row(
                         "SELECT language_selected, language_detected FROM meetings WHERE id = ?1",
                         [&meeting_id],
-                        |row| {
-                            let selected: Option<String> = row.get(0)?;
-                            let detected: Option<String> = row.get(1)?;
-                            Ok(TranscriptionStatus {
-                                meeting_id: meeting_id.clone(),
-                                state: if selected.is_some() || detected.is_some() {
-                                    "ready".into()
-                                } else {
-                                    "pending".into()
-                                },
-                                progress: if selected.is_some() || detected.is_some() {
-                                    1.0
-                                } else {
-                                    0.0
-                                },
-                                language: selected.or(detected),
-                                error: None,
-                            })
-                        },
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
+                let job: Option<(String, f64, Option<String>)> = connection
+                    .query_row(
+                        "SELECT state, progress, reason FROM jobs WHERE id = ?1",
+                        [format!("pipeline:{meeting_id}:transcription")],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .ok();
+                let (state, progress, error) = match job {
+                    Some((state, progress, reason)) => {
+                        let error = matches!(state.as_str(), "error" | "blocked").then_some(reason).flatten();
+                        let label = match state.as_str() {
+                            "done" => "ready",
+                            other => other,
+                        };
+                        (label.to_owned(), progress as f32, error)
+                    }
+                    None if selected.is_some() || detected.is_some() => ("ready".into(), 1.0, None),
+                    None => ("pending".into(), 0.0, None),
+                };
+                Ok(TranscriptionStatus {
+                    meeting_id: meeting_id.clone(),
+                    state,
+                    progress,
+                    language: selected.or(detected),
+                    error,
+                })
             })
             .map_err(|e| e.to_string())
     }

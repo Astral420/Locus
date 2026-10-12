@@ -20,6 +20,8 @@ import {
   MOCK_ACTIONS,
   MOCK_PIPELINE_STATUS,
   getSpeakerPalette,
+  normalizeTranscriptSegment,
+  adaptSummaryRevision,
   DIARIZATION_PALETTE,
   exportMeetingAsMarkdown,
   exportMeetingAsJson,
@@ -440,6 +442,104 @@ describe("M8.06: Slides Gallery Tab & OCR Snippets", () => {
   });
 });
 
+describe("Transcripts without speaker attribution (regression: speakerIdOrIndex.match)", () => {
+  it("getSpeakerPalette tolerates a missing speaker instead of throwing", () => {
+    expect(() => getSpeakerPalette(undefined)).not.toThrow();
+    expect(() => getSpeakerPalette(null)).not.toThrow();
+    expect(() => getSpeakerPalette("")).not.toThrow();
+  });
+
+  it("opaque ids get a stable colour that is not always the same hue", () => {
+    const a = getSpeakerPalette("0b3f9d2e-1111-4a5b-9c1d-aaaaaaaaaaaa");
+    const again = getSpeakerPalette("0b3f9d2e-1111-4a5b-9c1d-aaaaaaaaaaaa");
+    expect(a).toEqual(again);
+    const hues = new Set(
+      ["a1b2c3d4-e5f6", "ffee0011-2233", "9a8b7c6d-5e4f", "01010101-abab", "zzzz-yyyy-xxxx-wwww"].map(
+        (id) => getSpeakerPalette(id.repeat(2)).hue,
+      ),
+    );
+    expect(hues.size).toBeGreaterThan(1);
+  });
+
+  it("normalizes the backend shape and fills anything missing", () => {
+    expect(
+      normalizeTranscriptSegment({ id: "s1", start_seconds: 1.5, end_seconds: 3, text: "hi" } as never),
+    ).toEqual({ id: "s1", speaker_id: "", speaker_label: "", start_time: 1.5, end_time: 3, text: "hi" });
+    expect(normalizeTranscriptSegment({} as never).text).toBe("");
+  });
+
+  it("renders a transcript with no speakers: text and time, no speaker chip, no crash", () => {
+    render(
+      <TranscriptView
+        segments={[
+          { id: "a", speaker_id: "", speaker_label: "", start_time: 0, end_time: 2, text: "Welcome everyone" },
+          { id: "b", speaker_id: "", speaker_label: "", start_time: 2, end_time: 5, text: "Let us begin" },
+        ]}
+        currentTime={1}
+        onSeek={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Welcome everyone")).toBeDefined();
+    expect(screen.getByText("Let us begin")).toBeDefined();
+    expect(screen.queryByTitle(/click to rename speaker/i)).toBeNull();
+  });
+
+  it("still shows the speaker chip when a speaker is attributed", () => {
+    render(
+      <TranscriptView
+        segments={[
+          { id: "a", speaker_id: "spk-1", speaker_label: "Dana", start_time: 0, end_time: 2, text: "Hello" },
+        ]}
+        currentTime={0}
+        onSeek={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Dana")).toBeDefined();
+    expect(screen.getByTitle(/click to rename speaker/i)).toBeDefined();
+  });
+});
+
+describe("Backend summary shapes are adapted for the UI", () => {
+  it("flattens a backend revision (structured_json) into overview/decisions/concepts", () => {
+    const adapted = adaptSummaryRevision({
+      id: "r1",
+      meeting_id: "m1",
+      revision: 3,
+      freshness: "outdated",
+      published_at: "2026-10-11T09:00:00Z",
+      model_identity: "claude-x",
+      structured_json: { overview: "We agreed.", decisions: ["Ship Friday"], key_concepts: ["VAD"], extra: 1 },
+    } as never);
+    expect(adapted).toEqual({
+      id: "r1",
+      meeting_id: "m1",
+      revision_number: 3,
+      overview: "We agreed.",
+      decisions: ["Ship Friday"],
+      key_concepts: ["VAD"],
+      created_at: "2026-10-11T09:00:00Z",
+      model: "claude-x",
+      is_outdated: true,
+    });
+  });
+
+  it("never yields undefined lists, even for an empty or odd payload", () => {
+    const adapted = adaptSummaryRevision({ id: "r", structured_json: null } as never);
+    expect(adapted.overview).toBe("");
+    expect(adapted.decisions).toEqual([]);
+    expect(adapted.key_concepts).toEqual([]);
+  });
+
+  it("passes an already-flat UI revision through unchanged", () => {
+    const flat = MOCK_SUMMARY_REVISIONS[0];
+    expect(adaptSummaryRevision(flat as never)).toMatchObject({
+      overview: flat.overview,
+      decisions: flat.decisions,
+      revision_number: flat.revision_number,
+    });
+  });
+});
+
 describe("M8.07: Pipeline Status Display & Step Retries", () => {
   it("displays pipeline status badge and expands granular step execution graph", () => {
     render(<PipelineStatusBadge statusList={MOCK_PIPELINE_STATUS} />);
@@ -485,6 +585,79 @@ describe("M8.07: Pipeline Status Display & Step Retries", () => {
     await waitFor(() => {
       expect(handleRetryStep).toHaveBeenCalledWith("j-diarize");
     });
+  });
+});
+
+describe("Pipeline status: blocked, queued and skipped steps", () => {
+  const step = (kind: string, state: string, reason: string | null = null) => ({
+    job_id: `j-${kind}`,
+    kind,
+    state: state as "pending" | "running" | "done" | "error" | "blocked" | "skipped",
+    progress: 0,
+    reason,
+  });
+
+  it("shows a blocked step with its reason and a Retry button, not 'complete'", async () => {
+    const handleRetryStep = vi.fn();
+    render(
+      <PipelineStatusBadge
+        statusList={[
+          step("transcription", "done"),
+          step("summarization", "blocked", "Select an AI provider in Settings to generate the summary, then retry."),
+          step("indexing", "pending"),
+        ]}
+        onRetryStep={handleRetryStep}
+      />,
+    );
+    expect(screen.queryByText(/all pipeline steps complete/i)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /action needed/i }));
+    expect(screen.getByText(/select an ai provider in settings/i)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    await waitFor(() => expect(handleRetryStep).toHaveBeenCalledWith("j-summarization"));
+  });
+
+  it("shows what a finished step did and lets the user re-run it", async () => {
+    const handleRetryStep = vi.fn();
+    render(
+      <PipelineStatusBadge
+        statusList={[
+          step("encoding", "done"),
+          step("transcription", "done", "42 segments (energy VAD, CPU, language en detected (91%))."),
+        ]}
+        onRetryStep={handleRetryStep}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /all pipeline steps complete/i }));
+    expect(screen.getByText(/language en detected \(91%\)/i)).toBeDefined();
+    // only the transcription step offers Re-run; the recording itself cannot be redone
+    const reruns = screen.getAllByRole("button", { name: /re-run/i });
+    expect(reruns).toHaveLength(1);
+    fireEvent.click(reruns[0]);
+    await waitFor(() => expect(handleRetryStep).toHaveBeenCalledWith("j-transcription"));
+  });
+
+  it("says a meeting is queued while steps are still pending", () => {
+    render(
+      <PipelineStatusBadge
+        statusList={[step("encoding", "done"), step("transcription", "pending")]}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /queued for processing/i })).toBeDefined();
+  });
+
+  it("counts skipped optional steps as finished and explains why they were skipped", () => {
+    render(
+      <PipelineStatusBadge
+        statusList={[
+          step("transcription", "done"),
+          step("diarization", "skipped", "Speaker diarization is unavailable: pyannote.audio is not installed"),
+          step("summarization", "done"),
+        ]}
+      />,
+    );
+    const badge = screen.getByRole("button", { name: /all pipeline steps complete/i });
+    fireEvent.click(badge);
+    expect(screen.getByText(/pyannote\.audio is not installed/i)).toBeDefined();
   });
 });
 

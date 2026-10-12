@@ -83,7 +83,21 @@ export const MeetingDetailContent: React.FC = () => {
   const { data: pipelineStatus = [] } = useQuery<PipelineStatusDTO[]>({
     queryKey: ["pipeline", meetingId],
     queryFn: () => getPipelineStatus(meetingId),
+    // Poll only while the pipeline can still change by itself.
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((step) => step.state === "pending" || step.state === "running")
+        ? 2000
+        : false,
   });
+
+  // When a step finishes, the data it produces (transcript, slides, summary) is new.
+  const pipelineSignature = pipelineStatus.map((step) => `${step.kind}:${step.state}`).join("|");
+  useEffect(() => {
+    if (!pipelineSignature) return;
+    for (const key of ["transcript", "slides", "summary_revisions", "meeting-media"]) {
+      void queryClient.invalidateQueries({ queryKey: [key, meetingId] });
+    }
+  }, [pipelineSignature, meetingId, queryClient]);
 
   const { data: segments = [] } = useQuery<TranscriptSegmentDTO[]>({
     queryKey: ["transcript", meetingId],

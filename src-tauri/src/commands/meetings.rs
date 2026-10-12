@@ -155,7 +155,7 @@ pub fn get_pipeline_status(
                         job_id: row.get(0)?,
                         kind: row.get(1)?,
                         state: row.get(2)?,
-                        progress: row.get(3)?,
+                        progress: (row.get::<_, f64>(3)? * 100.0).round(),
                         reason: row.get(4)?,
                     })
                 })
@@ -170,11 +170,14 @@ pub fn get_pipeline_status(
 
 #[tauri::command]
 pub fn retry_pipeline_step(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
-    state.pipeline.retry(&job_id)
+    state.pipeline.retry(&job_id)?;
+    state.executor.notify();
+    Ok(())
 }
 
 #[tauri::command]
 pub fn get_slides(state: State<'_, AppState>, meeting_id: String) -> Result<Vec<SlideDto>, String> {
+    let media_root = state.media_root.clone();
     state
         .database
         .run(move |connection| {
@@ -196,10 +199,11 @@ pub fn get_slides(state: State<'_, AppState>, meeting_id: String) -> Result<Vec<
             let rows = stmt
                 .query_map([&meeting_id], |row| {
                     let rel_path: String = row.get(3)?;
-                    let image_url = if rel_path.starts_with('/') || rel_path.starts_with("http") {
+                    // Stored relative to the media root; the UI needs a real file path.
+                    let image_url = if std::path::Path::new(&rel_path).is_absolute() {
                         rel_path
                     } else {
-                        format!("/{}", rel_path)
+                        media_root.join(&rel_path).to_string_lossy().to_string()
                     };
 
                     Ok(SlideDto {

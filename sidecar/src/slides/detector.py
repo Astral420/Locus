@@ -5,12 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from ..errors import CapabilityUnavailable
+
 
 def detect_slides(video_path: str, output_dir: str | None = None, progress: Callable[[float, str | None], None] | None = None) -> list[dict[str, object]]:
     try:
         import cv2  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("opencv-python-headless is required for slide detection") from exc
+        raise CapabilityUnavailable(
+            "slide detection needs the Python package opencv-python-headless (pip install opencv-python-headless)"
+        ) from exc
     capture = cv2.VideoCapture(video_path)
     if not capture.isOpened():
         raise RuntimeError(f"unable to open video: {video_path}")

@@ -125,7 +125,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
     const q = filterText.toLowerCase();
     return (
       seg.text.toLowerCase().includes(q) ||
-      seg.speaker_label.toLowerCase().includes(q) ||
+      (seg.speaker_label ?? "").toLowerCase().includes(q) ||
       formatTime(seg.start_time).includes(q)
     );
   });
@@ -179,6 +179,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
         ) : (
           filteredSegments.map((seg, idx) => {
             const isActive = currentTime >= seg.start_time && currentTime <= seg.end_time;
+            const hasSpeaker = Boolean(seg.speaker_id || seg.speaker_label);
             const palette = getSpeakerPalette(seg.speaker_id || seg.speaker_label, isDark);
 
             return (
@@ -224,7 +225,9 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                       {formatTime(seg.start_time)}
                     </button>
 
-                    {/* Speaker Badge with Diarization Palette Hue (DESIGN.md §2.3) */}
+                    {/* Speaker Badge with Diarization Palette Hue (DESIGN.md §2.3).
+                        Omitted when diarization did not run: no speaker is invented. */}
+                    {hasSpeaker && (
                     <div className="relative inline-flex items-center">
                       <span
                         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border transition-colors cursor-pointer"
@@ -244,6 +247,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                         <Edit2 className="w-2.5 h-2.5 opacity-60 hover:opacity-100" />
                       </span>
                     </div>
+                    )}
                   </div>
 
                   <span className="font-mono text-[10px] text-ink-subtle">

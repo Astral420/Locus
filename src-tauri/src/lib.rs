@@ -6,6 +6,7 @@ pub mod deletion;
 pub mod keychain;
 pub mod knowledge;
 pub mod llm;
+pub mod paths;
 pub mod pipeline;
 pub mod sidecar;
 pub mod storage;
@@ -25,6 +26,8 @@ use tauri::{Emitter, Manager};
 pub struct AppState {
     pub capture: CaptureManager,
     pub media_root: PathBuf,
+    pub paths: paths::AppPaths,
+    pub executor: pipeline::executor::PipelineExecutor,
     pub database: Database,
     pub transcription: transcription::TranscriptionService,
     pub providers: llm::providers::ProviderSelectionService,
@@ -38,39 +41,94 @@ pub struct AppState {
     pub embedding_server: Arc<Mutex<Option<Arc<llm::llama_cpp::LlamaServerManager>>>>,
 }
 
-pub fn run() {
-    let database = Database::open("locus.sqlite").expect("database worker must start");
-    let _ = deletion::retry_pending_cleanup(&database, "media");
-    let sidecar = Arc::new(Mutex::new(SidecarManager::new("python3", ".")));
+/// Models root recorded by "move models" in Settings, if it still exists.
+fn stored_models_root(database: &Database) -> Option<PathBuf> {
+    database
+        .run(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT value_json FROM settings WHERE key='storage.models_root'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok())
+        })
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<String>(&json).ok())
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+fn build_state(app: &tauri::AppHandle) -> Result<AppState, Box<dyn std::error::Error>> {
+    let data_dir = app.path().app_data_dir()?;
+    let mut paths = paths::AppPaths::resolve(data_dir, app.path().resource_dir().ok());
+    paths.create_directories()?;
+    // Earlier builds kept everything relative to the working directory.
+    if let Ok(working_directory) = std::env::current_dir() {
+        match paths::adopt_legacy_working_directory_data(&working_directory, &paths) {
+            Ok(adopted) if adopted != paths::LegacyAdoption::default() => {
+                eprintln!("locus: imported earlier data from {}: {adopted:?}", working_directory.display());
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("locus: could not import earlier data: {error}"),
+        }
+    }
+    let database = Database::open(&paths.database)?;
+    if let Some(models) = stored_models_root(&database) {
+        paths.models = models;
+        paths.create_directories()?;
+    }
+    let _ = deletion::retry_pending_cleanup(&database, &paths.media);
+    let sidecar = Arc::new(Mutex::new(SidecarManager::new(
+        paths.python.clone(),
+        paths.sidecar_root.clone(),
+    )));
     let embedding_models =
-        EmbeddingModelManager::new("models/embedding").with_database(database.clone());
+        EmbeddingModelManager::new(paths.embedding_models()).with_database(database.clone());
     let generation_models =
-        GenerationModelManager::new("models/generation").with_database(database.clone());
-    let storage = storage::StorageService::new(database.clone(), "media", "models");
+        GenerationModelManager::new(paths.generation_models()).with_database(database.clone());
+    let storage = storage::StorageService::new(
+        database.clone(),
+        paths.media.clone(),
+        paths.models.clone(),
+    );
     let _ = storage.recover_incomplete();
-    let pipeline = PipelineOrchestrator::new(database.clone());
-    let state = AppState {
+    Ok(AppState {
         capture: CaptureManager::with_audio(Some(database.clone())),
-        media_root: PathBuf::from("media"),
-        database: database.clone(),
+        media_root: paths.media.clone(),
         transcription: transcription::TranscriptionService::new(database.clone()),
         providers: llm::providers::ProviderSelectionService::new(database.clone()),
         summarization: llm::summarization::SummarizationService::new(database.clone()),
         knowledge: knowledge::KnowledgeService::new(
             database.clone(),
             Arc::clone(&sidecar),
-            "documents",
+            paths.documents.clone(),
         ),
         sidecar,
         embedding_models,
         generation_models,
         storage,
-        pipeline,
+        pipeline: PipelineOrchestrator::new(database.clone()),
         embedding_server: Arc::new(Mutex::new(None)),
-    };
-    state.capture.start_watchdog();
+        executor: pipeline::executor::PipelineExecutor::new(),
+        paths,
+        database,
+    })
+}
+
+pub fn run() {
     tauri::Builder::default()
-        .manage(state)
+        .setup(|app| {
+            let state = build_state(app.handle())?;
+            // Recordings are played back through the asset protocol; allow exactly
+            // the media directory this build uses.
+            let _ = app.asset_protocol_scope().allow_directory(&state.paths.media, true);
+            state.capture.start_watchdog();
+            app.manage(state);
+            app.state::<AppState>().executor.start(app.handle().clone());
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();

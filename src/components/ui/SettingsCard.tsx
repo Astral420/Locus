@@ -17,18 +17,31 @@ export interface SettingsRowProps {
   description?: ReactNode;
   control?: ReactNode;
   children?: ReactNode;
+  /**
+   * "inline" (default) right-aligns a compact control beside the label.
+   * "stacked" puts the control on its own line at full width; use it for long
+   * values such as file paths, which must truncate instead of pushing into the label.
+   */
+  layout?: "inline" | "stacked";
 }
 
 /** Label + muted description on the left, control right-aligned, hairline divider between rows. */
-export const SettingsRow: React.FC<SettingsRowProps> = ({ label, description, control, children }) => (
+export const SettingsRow: React.FC<SettingsRowProps> = ({
+  label,
+  description,
+  control,
+  children,
+  layout = "inline",
+}) => (
   <div className="py-3.5 first:pt-2">
     <div className="flex items-center justify-between gap-6">
       <div className="min-w-0">
         <div className="text-sm font-medium text-ink">{label}</div>
         {description && <div className="text-[13px] text-ink-muted mt-0.5 leading-snug">{description}</div>}
       </div>
-      {control && <div className="shrink-0 flex items-center gap-2">{control}</div>}
+      {control && layout === "inline" && <div className="shrink-0 flex items-center gap-2">{control}</div>}
     </div>
+    {control && layout === "stacked" && <div className="mt-2 flex min-w-0 items-center gap-2">{control}</div>}
     {children && <div className="mt-3">{children}</div>}
   </div>
 );

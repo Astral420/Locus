@@ -57,16 +57,28 @@ pub fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelAssetDto>, Str
         })
         .map_err(|e| e.to_string())?;
 
+    // Reflect what is really on disk: the model is a release/maintainer input
+    // that may not be present, and the pipeline blocks without it.
+    let whisper_found = crate::paths::find_whisper_model(
+        &state.paths,
+        None,
+        std::env::var_os(crate::paths::ENV_WHISPER_MODEL).map(std::path::PathBuf::from),
+    )
+    .is_some();
     let mut assets = vec![ModelAssetDto {
         id: "whisper:small:bundled".into(),
-        name: "Whisper Small (bundled)".into(),
+        name: if whisper_found {
+            "Whisper Small".into()
+        } else {
+            "Whisper Small (not installed)".into()
+        },
         role: "whisper".into(),
         parameter_size: "244M".into(),
         quantization: None,
         memory_ram: "1 GB".into(),
         memory_vram: "1 GB".into(),
         disk_size: "466 MiB".into(),
-        status: "bundled".into(),
+        status: if whisper_found { "bundled" } else { "available" }.into(),
         download_progress: None,
     }];
     for model in GenerationModelManager::catalog() {

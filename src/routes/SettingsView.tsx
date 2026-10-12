@@ -371,18 +371,21 @@ export const SettingsContent: React.FC = () => {
             <SettingsCard title="Storage Paths & Migration">
               <SettingsRow
                 label="Meeting Storage"
-                description="SQLite database and media files."
+                description="Recordings and slide images."
+                layout="stacked"
                 control={<PathChip path={storage?.data_root ?? "Loading…"} />}
               />
               <SettingsRow
                 label="Models Storage"
-                description="GGUF model weights."
+                description="Whisper and GGUF model weights."
+                layout="stacked"
                 control={
                   <>
                     <PathChip path={storage?.models_root ?? "Loading…"} />
                     <Button
                       variant="secondary"
                       size="sm"
+                      className="shrink-0"
                       onClick={() => {
                         const target = window.prompt("Enter an empty directory for managed models");
                         if (target) void migrateModels(target).then((message) => setProviderMessage(message)).catch((error: unknown) => setProviderMessage(error instanceof Error ? error.message : "Storage migration failed."));

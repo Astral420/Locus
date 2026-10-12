@@ -9,7 +9,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..diarization.engine import diarize
+from ..errors import CAPABILITY_UNAVAILABLE, CapabilityUnavailable
+from ..diarization.engine import DiarizationUnavailable, diarize
 from ..diarization.vad import vad
 from ..slides.detector import detect_slides
 from ..slides.ocr import ocr_slide
@@ -101,6 +102,9 @@ class JsonRpcServer:
             return {"jsonrpc": PROTOCOL_VERSION, "result": result, "id": request_id}
         except RpcFault as exc:
             return self._error(request_id, exc.code, exc.message, exc.data)
+        except CapabilityUnavailable as exc:
+            logger.info("method %s unavailable: %s", method, exc)
+            return self._error(request_id, CAPABILITY_UNAVAILABLE, str(exc))
         except FileNotFoundError as exc:
             return self._error(request_id, -32004, f"input not found: {exc}")
         except Exception as exc:
@@ -119,7 +123,13 @@ class JsonRpcServer:
 
     def _diarize(self, params: dict[str, Any], context: RequestContext) -> dict[str, Any]:
         self._require_path(params, "audio_path")
-        return {"segments": diarize(params["audio_path"], bool(params.get("single_person", False)), progress=context.progress)}
+        try:
+            segments = diarize(params["audio_path"], bool(params.get("single_person", False)), progress=context.progress)
+        except DiarizationUnavailable as error:
+            # Honest "not available": the host marks the step skipped rather than
+            # receiving invented speaker labels.
+            return {"segments": [], "unavailable": str(error)}
+        return {"segments": segments}
 
     def _detect_slides(self, params: dict[str, Any], context: RequestContext) -> dict[str, Any]:
         self._require_path(params, "video_path")

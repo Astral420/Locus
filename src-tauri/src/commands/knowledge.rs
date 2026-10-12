@@ -293,7 +293,7 @@ pub fn select_embedding_model(
         .map_err(|error| error.to_string())
 }
 
-fn embedding_provider(
+pub(crate) fn embedding_provider(
     state: &AppState,
 ) -> Result<crate::knowledge::LlamaEmbeddingProvider, String> {
     let asset = state.embedding_models.selected().map_err(|_| {

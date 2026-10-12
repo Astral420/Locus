@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiarizationSegment {
     pub start: f32,
     pub end: f32,
@@ -21,13 +21,23 @@ fn default_source() -> String {
 #[derive(Debug, Deserialize)]
 struct DiarizationResponse {
     segments: Vec<DiarizationSegment>,
+    /// Set by the sidecar when no real diarization model is available. The host
+    /// must skip the step; it must never substitute guessed speaker labels.
+    #[serde(default)]
+    unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiarizationOutcome {
+    Segments(Vec<DiarizationSegment>),
+    Unavailable(String),
 }
 
 pub fn diarize(
     client: &mut SidecarClient,
     audio_path: &str,
     single_person_mic: bool,
-) -> Result<Vec<DiarizationSegment>, SidecarError> {
+) -> Result<DiarizationOutcome, SidecarError> {
     let response: DiarizationResponse = client.call(
         "diarize",
         serde_json::json!({
@@ -35,7 +45,10 @@ pub fn diarize(
             "single_person": single_person_mic,
         }),
     )?;
-    Ok(response.segments)
+    Ok(match response.unavailable {
+        Some(reason) => DiarizationOutcome::Unavailable(reason),
+        None => DiarizationOutcome::Segments(response.segments),
+    })
 }
 
 /// Returns the speaker with the greatest overlap for each transcript segment.
@@ -65,7 +78,7 @@ pub fn persist_alignments(
     let segments = segments.to_vec();
     db.run(move |connection| {
         let transcript_segments: Vec<(String, f32, f32)> = {
-            let mut statement = connection.prepare("SELECT id, start_seconds, end_seconds FROM transcript_segments WHERE meeting_id = ?1 ORDER BY ordinal").map_err(|e| e.to_string())?;
+            let mut statement = connection.prepare("SELECT id, start_seconds, end_seconds FROM transcript_segments WHERE transcript_revision_id = (SELECT current_transcript_revision_id FROM meetings WHERE id = ?1) ORDER BY ordinal").map_err(|e| e.to_string())?;
             let rows = statement
                 .query_map([&meeting_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
                 .map_err(|e| e.to_string())?
@@ -74,6 +87,8 @@ pub fn persist_alignments(
             rows
         };
         let tx = connection.transaction().map_err(|e| e.to_string())?;
+        // Re-running diarization replaces earlier alignments instead of stacking them.
+        tx.execute("DELETE FROM speaker_alignments WHERE transcript_segment_id IN (SELECT id FROM transcript_segments WHERE meeting_id = ?1)", [&meeting_id]).map_err(|e| e.to_string())?;
         for segment in &segments {
             tx.execute("INSERT OR IGNORE INTO speakers(id, meeting_id, anonymous_label, display_name) VALUES (?1, ?2, ?3, NULL)", (Uuid::new_v4().to_string(), &meeting_id, &segment.speaker)).map_err(|e| e.to_string())?;
         }

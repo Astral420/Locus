@@ -210,12 +210,17 @@ export const DIARIZATION_PALETTE: SpeakerPaletteColor[] = [
   },
 ];
 
-export function getSpeakerPalette(speakerIdOrIndex: string | number, isDark = false): { text: string; bg: string; border: string; hue: string } {
+export function getSpeakerPalette(
+  speakerIdOrIndex: string | number | null | undefined,
+  isDark = false,
+): { text: string; bg: string; border: string; hue: string } {
   let index = 0;
   if (typeof speakerIdOrIndex === "number") {
     index = speakerIdOrIndex;
-  } else {
-    const match = speakerIdOrIndex.match(/\d+/);
+  } else if (typeof speakerIdOrIndex === "string" && speakerIdOrIndex.length > 0) {
+    // Short ids such as "spk-2" / "SPEAKER_01" carry their own number. Long ids
+    // (UUIDs) would yield an arbitrary first digit run, so they are hashed instead.
+    const match = speakerIdOrIndex.length <= 16 ? speakerIdOrIndex.match(/\d+/) : null;
     if (match) {
       index = parseInt(match[0], 10) - 1;
     } else {
@@ -224,7 +229,8 @@ export function getSpeakerPalette(speakerIdOrIndex: string | number, isDark = fa
         hash = (hash << 5) - hash + speakerIdOrIndex.charCodeAt(i);
         hash |= 0;
       }
-      index = Math.abs(hash);
+      // Spread opaque ids over the real hues; the last entry is the "Speaker 7+" overflow colour.
+      index = Math.abs(hash) % Math.max(1, DIARIZATION_PALETTE.length - 1);
     }
   }
   const colorIndex = Math.min(Math.max(0, index), DIARIZATION_PALETTE.length - 1);
@@ -863,8 +869,23 @@ export function retryPipelineStep(jobId: string): Promise<void> {
   });
 }
 
-export function listTranscriptSegments(meetingId: string): Promise<TranscriptSegmentDTO[]> {
-  return safeInvoke("list_transcript_segments", { meetingId }, () => mockSegmentsStore);
+/** Accepts what the backend sends and guarantees every field the UI reads exists. */
+export function normalizeTranscriptSegment(raw: Partial<TranscriptSegmentDTO> & Record<string, unknown>): TranscriptSegmentDTO {
+  const num = (value: unknown, fallback = 0) => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
+  const start = num(raw.start_time, num(raw.start_seconds));
+  return {
+    id: String(raw.id ?? `${start}`),
+    speaker_id: typeof raw.speaker_id === "string" ? raw.speaker_id : "",
+    speaker_label: typeof raw.speaker_label === "string" ? raw.speaker_label : "",
+    start_time: start,
+    end_time: num(raw.end_time, num(raw.end_seconds, start)),
+    text: typeof raw.text === "string" ? raw.text : "",
+  };
+}
+
+export async function listTranscriptSegments(meetingId: string): Promise<TranscriptSegmentDTO[]> {
+  const segments = await safeInvoke<TranscriptSegmentDTO[]>("list_transcript_segments", { meetingId }, () => mockSegmentsStore);
+  return segments.map((segment) => normalizeTranscriptSegment(segment as never));
 }
 
 export function renameSpeaker(speakerId: string, displayName: string): Promise<void> {
@@ -875,8 +896,15 @@ export function renameSpeaker(speakerId: string, displayName: string): Promise<v
   });
 }
 
-export function getSlides(meetingId: string): Promise<SlideDTO[]> {
-  return safeInvoke("get_slides", { meetingId }, () => MOCK_SLIDES);
+export async function getSlides(meetingId: string): Promise<SlideDTO[]> {
+  const slides = await safeInvoke<SlideDTO[]>("get_slides", { meetingId }, () => MOCK_SLIDES);
+  // Real slide images are files under the media directory; the webview can only
+  // load them through the asset protocol. Bundled mock images are served as-is.
+  return slides.map((slide) =>
+    slide.image_url && !slide.image_url.startsWith("/slides/")
+      ? { ...slide, image_url: safeConvertFileSrc(slide.image_url) }
+      : slide,
+  );
 }
 
 export function listModels(): Promise<ModelAssetDTO[]> {
@@ -1214,14 +1242,47 @@ export function triggerSummary(meetingId: string, regenerate = false): Promise<B
   return safeInvoke("trigger_summary", { meetingId, regenerate });
 }
 
-export function listSummaryRevisions(meetingId: string): Promise<SummaryRevisionDTO[]> {
-  return safeInvoke("get_summary_revisions", { meetingId }, () => MOCK_SUMMARY_REVISIONS);
+const asStringList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+/**
+ * The backend stores a revision as `structured_json` (the generated summary)
+ * plus bookkeeping; the UI works with a flat view. Accepts either shape.
+ */
+export function adaptSummaryRevision(raw: Partial<BackendSummaryRevisionDTO & SummaryRevisionDTO> & Record<string, unknown>): SummaryRevisionDTO {
+  const structured = (raw.structured_json && typeof raw.structured_json === "object" ? raw.structured_json : {}) as Record<string, unknown>;
+  const pick = (key: string, direct: unknown) => (direct !== undefined ? direct : structured[key]);
+  return {
+    id: String(raw.id ?? ""),
+    meeting_id: String(raw.meeting_id ?? ""),
+    revision_number: typeof raw.revision_number === "number" ? raw.revision_number : typeof raw.revision === "number" ? raw.revision : 1,
+    overview: typeof pick("overview", raw.overview) === "string" ? (pick("overview", raw.overview) as string) : "",
+    decisions: asStringList(pick("decisions", raw.decisions)),
+    key_concepts: asStringList(pick("key_concepts", raw.key_concepts)),
+    created_at: String(raw.created_at ?? raw.published_at ?? ""),
+    model: String(raw.model ?? raw.model_identity ?? ""),
+    is_outdated: raw.is_outdated ?? raw.freshness === "outdated",
+  };
 }
 
-export function listActionItems(summaryRevisionId: string): Promise<ActionItemDTO[]> {
-  return safeInvoke("get_action_items", { summaryRevisionId }, () =>
+export async function listSummaryRevisions(meetingId: string): Promise<SummaryRevisionDTO[]> {
+  const revisions = await safeInvoke<SummaryRevisionDTO[]>("get_summary_revisions", { meetingId }, () => MOCK_SUMMARY_REVISIONS);
+  return revisions.map((revision) => adaptSummaryRevision(revision as never));
+}
+
+export async function listActionItems(summaryRevisionId: string): Promise<ActionItemDTO[]> {
+  const items = await safeInvoke<Array<ActionItemDTO & Partial<SummaryActionItemDTO>>>("get_action_items", { summaryRevisionId }, () =>
     mockActionsStore.filter((a) => a.summary_revision_id === summaryRevisionId)
   );
+  return items.map((item) => ({
+    id: item.id,
+    summary_revision_id: item.summary_revision_id,
+    text: item.text ?? "",
+    // Backend rows carry the spoken phrase ("by Friday"); the UI shows it as the deadline.
+    assignee: item.assignee ?? null,
+    deadline: item.deadline ?? item.deadline_phrase ?? item.normalized_deadline ?? null,
+    completed: Boolean(item.completed),
+  }));
 }
 
 export function toggleActionItem(actionItemId: string, completed: boolean): Promise<void> {

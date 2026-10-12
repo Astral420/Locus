@@ -214,3 +214,33 @@ describe("Redesign primitives: Button and Badge", () => {
     expect(badge.className).not.toContain("border");
   });
 });
+
+describe("Settings storage rows: long paths must not overlap the label", () => {
+  const longPath = "/Users/someone/Library/Application Support/com.locus.desktop/models/with/a/very/long/tail";
+
+  it("stacked rows put the control on its own line instead of in the right-aligned label row", () => {
+    const { container } = render(
+      <SettingsRow label="Models Storage" layout="stacked" control={<PathChip path={longPath} />} />,
+    );
+    const labelRow = container.querySelector(".justify-between") as HTMLElement;
+    expect(labelRow.textContent).toContain("Models Storage");
+    // the path is NOT inside the label row, so it cannot be squeezed against (or over) the label
+    expect(labelRow.textContent).not.toContain(longPath);
+    const stacked = screen.getByText(longPath).closest("div.min-w-0") as HTMLElement;
+    expect(stacked.className).not.toContain("shrink-0");
+  });
+
+  it("inline rows keep the compact right-aligned control", () => {
+    const { container } = render(<SettingsRow label="Theme" control={<button>Edit</button>} />);
+    const labelRow = container.querySelector(".justify-between") as HTMLElement;
+    expect(labelRow.textContent).toContain("Edit");
+  });
+
+  it("truncates long paths and exposes the full path on hover", () => {
+    render(<PathChip path={longPath} />);
+    const code = screen.getByText(longPath);
+    expect(code.className).toContain("truncate");
+    expect(code.className).toContain("min-w-0");
+    expect(code.getAttribute("title")).toBe(longPath);
+  });
+});

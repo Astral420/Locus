@@ -14,8 +14,8 @@ export const PathChip: React.FC<{ path: string }> = ({ path }) => {
       .catch(() => undefined);
   };
   return (
-    <span className="inline-flex items-center gap-1.5 max-w-full">
-      <code className="truncate rounded-md bg-surface-hover px-2 py-1 text-[11px] font-mono text-ink-muted">{path}</code>
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
+      <code title={path} className="min-w-0 truncate rounded-md bg-surface-hover px-2 py-1 text-[11px] font-mono text-ink-muted">{path}</code>
       <button
         type="button"
         onClick={copy}
