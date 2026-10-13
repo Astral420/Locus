@@ -23,3 +23,8 @@ target/
 src-tauri/gen/
 .pytest_cache/
 src-tauri/media/
+
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
