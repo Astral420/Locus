@@ -45,13 +45,33 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
     (seg) => currentTime >= seg.start_time && currentTime <= seg.end_time
   );
 
-  // Auto-scroll to center active segment (DESIGN.md §4.2.C)
+  // Auto-scroll to center the active segment (DESIGN.md §4.2.C).
+  //
+  // This must scroll the transcript container ONLY. `element.scrollIntoView()`
+  // scrolls every scrollable ancestor, including `overflow-hidden` ones such as
+  // the two-pane layout, which moves the whole page while the recording plays.
+  const programmaticScrollRef = useRef<{ from: number; to: number; until: number }>({
+    from: 0,
+    to: 0,
+    until: 0,
+  });
+
   const scrollToActive = useCallback(() => {
-    if (activeSegmentRef.current && containerRef.current) {
-      activeSegmentRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
+    const container = containerRef.current;
+    const element = activeSegmentRef.current;
+    if (!container || !element) return;
+    const elementTop =
+      element.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+    const centred = elementTop - container.clientHeight / 2 + element.offsetHeight / 2;
+    const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const top = Math.min(Math.max(0, centred), maxTop);
+    // Remember where this scroll starts and ends, so its own scroll events are
+    // not mistaken for the user scrolling.
+    programmaticScrollRef.current = { from: container.scrollTop, to: top, until: Date.now() + 1500 };
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({ top, behavior: "smooth" });
+    } else {
+      container.scrollTop = top;
     }
   }, []);
 
@@ -61,8 +81,9 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
     }
   }, [activeIndex, isUserScrolling, scrollToActive]);
 
-  // Handle manual scroll pause (pause for 8s)
-  const handleScroll = () => {
+  // The user taking over: pause following for 8 s
+  const pauseAutoScroll = () => {
+    programmaticScrollRef.current.until = 0;
     setIsUserScrolling(true);
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current);
@@ -70,6 +91,15 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
     scrollTimeoutRef.current = setTimeout(() => {
       setIsUserScrolling(false);
     }, 8000);
+  };
+
+  // Scroll events also come from our own smooth auto-scroll; only the ones that
+  // fall outside the path we are animating along count as the user scrolling.
+  const handleScroll = () => {
+    const { from, to, until } = programmaticScrollRef.current;
+    const top = containerRef.current?.scrollTop ?? 0;
+    const ours = Date.now() < until && top >= Math.min(from, to) - 2 && top <= Math.max(from, to) + 2;
+    if (!ours) pauseAutoScroll();
   };
 
   // Jump to current pill click
@@ -131,7 +161,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
   });
 
   return (
-    <div className="relative flex flex-col h-full min-h-0">
+    <div className="relative flex flex-col flex-1 min-h-0">
       {/* Transcript Toolbar: Search & Filter */}
       <div className="pb-3 flex items-center justify-between gap-3">
         <div className="relative flex-1 max-w-sm">
@@ -168,6 +198,8 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
       <div
         ref={containerRef}
         onScroll={handleScroll}
+        onWheel={pauseAutoScroll}
+        onTouchMove={pauseAutoScroll}
         role="feed"
         aria-label="Synchronized meeting transcript"
         className="flex-1 overflow-y-auto p-4 space-y-2.5 focus-visible:outline-none"

@@ -40,7 +40,7 @@ const useThreads = (list: tauri.KnowledgeThreadDTO[]) => {
 beforeEach(() => {
   localStorage.clear();
   useUiStore.setState({ sidebarCollapsed: false });
-  useKnowledgeStore.setState({ selectedThreadId: null });
+  useKnowledgeStore.setState({ selectedThreadId: null, draft: null });
   vi.mocked(tauri.deleteKnowledgeThread).mockClear();
   vi.mocked(tauri.listKnowledgeThreads).mockClear();
 });

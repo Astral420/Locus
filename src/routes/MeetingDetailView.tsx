@@ -1,5 +1,6 @@
 import { useUiStore } from "../stores/uiStore";
 import { hiddenSidebarInset } from "../lib/platform";
+import { createThreadForFirstMessage, discardIfEmpty } from "../lib/knowledgeThreads";
 import React, { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -25,7 +26,6 @@ import {
   getSlides,
   listSummaryRevisions,
   listActionItems,
-  createKnowledgeThread,
   listKnowledgeMessages,
   sendKnowledgeMessage,
   exportMeetingAsMarkdown,
@@ -135,14 +135,11 @@ export const MeetingDetailContent: React.FC = () => {
     enabled: Boolean(chatThreadId),
   });
 
+  // A new meeting means a new, empty chat. The conversation is only created (and only then shown in the
+  // sidebar) when the first question is actually sent.
   useEffect(() => {
-    let mounted = true;
-    void createKnowledgeThread("this_meeting", meetingId).then((thread) => {
-      if (mounted) setChatThreadId(thread.id);
-    }).catch((error) => {
-      if (mounted) setChatError(error instanceof Error ? error.message : "Meeting chat is unavailable.");
-    });
-    return () => { mounted = false; };
+    setChatThreadId(null);
+    setChatError(null);
   }, [meetingId]);
 
   const formatTime = (secs: number) => {
@@ -189,16 +186,30 @@ export const MeetingDetailContent: React.FC = () => {
 
   const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || !chatThreadId || chatSending) return;
+    if (!chatInput.trim() || chatSending) return;
     const userMsg = chatInput.trim();
     setChatInput("");
     setChatError(null);
     setChatSending(true);
+    let threadId = chatThreadId;
+    let createdForThisMessage = false;
     try {
-      await sendKnowledgeMessage(chatThreadId, userMsg);
-      await queryClient.invalidateQueries({ queryKey: ["meetingKnowledgeMessages", chatThreadId] });
+      if (!threadId) {
+        const thread = await createThreadForFirstMessage(queryClient, "this_meeting", meetingId);
+        threadId = thread.id;
+        createdForThisMessage = true;
+        setChatThreadId(thread.id);
+      }
+      await sendKnowledgeMessage(threadId, userMsg);
+      await queryClient.invalidateQueries({ queryKey: ["meetingKnowledgeMessages", threadId] });
+      await queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "The selected provider could not answer.");
+      if (createdForThisMessage && threadId) {
+        void discardIfEmpty(queryClient, threadId);
+        setChatThreadId(null);
+        setChatInput(userMsg);
+      }
     } finally {
       setChatSending(false);
     }
@@ -337,7 +348,7 @@ export const MeetingDetailContent: React.FC = () => {
         </div>
 
         {/* Right Column (7/12 cols): Tabbed Studio Workspace */}
-        <div className="lg:col-span-6 xl:col-span-7 flex flex-col min-h-[34rem] lg:min-h-0 rounded-2xl bg-surface">
+        <div className="lg:col-span-6 xl:col-span-7 flex flex-col h-[75vh] min-h-[34rem] lg:h-auto lg:min-h-0 rounded-2xl bg-surface">
           {/* Tab Navigation Header (DESIGN.md §4.2) */}
           <div className="h-14 flex items-center px-4 gap-1 shrink-0 overflow-x-auto">
             <button
@@ -415,7 +426,7 @@ export const MeetingDetailContent: React.FC = () => {
           </div>
 
           {/* Tab Content Body */}
-          <div className="flex-1 p-6 overflow-y-auto">
+          <div className={`flex-1 min-h-0 p-6 ${activeTab === "transcript" ? "flex flex-col" : "overflow-y-auto"}`}>
             {/* TAB: SUMMARY (Task M8.04) */}
             {activeTab === "summary" && activeRevision && (
               <SummaryTab

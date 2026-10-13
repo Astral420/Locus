@@ -6,6 +6,7 @@ import { Badge } from "../components/ui/Badge";
 import { Skeleton } from "../components/ui/Skeleton";
 import { ProgressBar } from "../components/ui/ProgressBar";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
+import { Toggle } from "../components/ui/Toggle";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { listModels, selectModel, type ModelAssetDTO } from "../lib/tauri";
 import { useUiStore } from "../stores/uiStore";
@@ -21,6 +22,10 @@ const STATUS_LABEL: Record<ModelAssetDTO["status"], string> = {
   available: "Available",
   error: "Error",
 };
+
+/** On this machine already (bundled with the app, downloaded/imported, or currently selected). */
+export const isInstalled = (model: ModelAssetDTO): boolean =>
+  model.status === "bundled" || model.status === "installed" || model.status === "active";
 
 /** One Hub-style model card. Catalog fields (author, downloads, variants, tags, fits) render only when present. */
 const ModelCard: React.FC<{ model: ModelAssetDTO; onSelect: (id: string) => void }> = ({ model, onSelect }) => {
@@ -156,6 +161,8 @@ export const ModelsContent: React.FC = () => {
   });
   const noticeDismissed = useUiStore((s) => s.coreEngineNoticeDismissed);
   const dismissNotice = useUiStore((s) => s.dismissCoreEngineNotice);
+  const installedOnly = useUiStore((s) => s.modelsInstalledOnly);
+  const setInstalledOnly = useUiStore((s) => s.setModelsInstalledOnly);
 
   if (isLoading) {
     return (
@@ -167,7 +174,9 @@ export const ModelsContent: React.FC = () => {
     );
   }
 
-  const filteredModels = (models || []).filter((m) => m.role === activeTab);
+  const inTab = (models || []).filter((m) => m.role === activeTab);
+  const installedCount = inTab.filter(isInstalled).length;
+  const filteredModels = installedOnly ? inTab.filter(isInstalled) : inTab;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -201,7 +210,7 @@ export const ModelsContent: React.FC = () => {
           </div>
         )}
 
-        <div className="py-2">
+        <div className="py-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <SegmentedControl<ModelTab>
             aria-label="Model category"
             value={activeTab}
@@ -212,7 +221,23 @@ export const ModelsContent: React.FC = () => {
               { value: "embedding", label: "Embedding (RAG)" },
             ]}
           />
+          <label className="inline-flex items-center gap-2 text-[13px] text-ink-muted cursor-pointer select-none">
+            <span>
+              Installed only
+              <span className="ml-1.5 nums-tabular text-ink-subtle" aria-hidden="true">
+                {installedCount}
+              </span>
+            </span>
+            <Toggle checked={installedOnly} onChange={setInstalledOnly} label="Show installed models only" />
+          </label>
         </div>
+
+        {installedOnly && filteredModels.length === 0 && (
+          <div role="status" className="rounded-xl bg-surface px-4 py-6 text-center text-[13px] text-ink-muted">
+            No {activeTab === "whisper" ? "Whisper" : activeTab === "llm" ? "summarization" : "embedding"} models are installed yet.
+            Turn off “Installed only” to browse what is available.
+          </div>
+        )}
 
         {filteredModels.map((model) => (
           <ModelCard

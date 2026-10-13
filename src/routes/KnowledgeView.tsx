@@ -7,7 +7,6 @@ import { Skeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import {
-  createKnowledgeThread,
   getKnowledgeIndexStatus,
   listDocuments,
   listKnowledgeMessages,
@@ -23,7 +22,7 @@ import {
   type KnowledgeThreadDTO,
 } from "../lib/tauri";
 import { BookOpen, CheckCircle2, ChevronDown, FileText, LoaderCircle, Search, Send, ShieldCheck, Square, Upload } from "lucide-react";
-import { KNOWLEDGE_SCOPE_LABELS, openKnowledgeThread } from "../lib/knowledgeThreads";
+import { createThreadForFirstMessage, discardIfEmpty, KNOWLEDGE_SCOPE_LABELS, startKnowledgeDraft, visibleThreads } from "../lib/knowledgeThreads";
 import { useKnowledgeStore } from "../stores/knowledgeStore";
 
 const scopeLabels = KNOWLEDGE_SCOPE_LABELS;
@@ -109,7 +108,7 @@ export const KnowledgeContent: React.FC = () => {
   const queryClient = useQueryClient();
   const selectedThreadId = useKnowledgeStore((s) => s.selectedThreadId);
   const setSelectedThreadId = useKnowledgeStore((s) => s.setSelectedThreadId);
-  const [scope, setScope] = useState<KnowledgeScope>("all_meetings");
+  const draft = useKnowledgeStore((s) => s.draft);
   const [inputQuery, setInputQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<KnowledgeSearchResultDTO[]>([]);
@@ -123,6 +122,8 @@ export const KnowledgeContent: React.FC = () => {
     queryKey: ["knowledgeThreads"],
     queryFn: listKnowledgeThreads,
   });
+  // Conversations that were actually started; empty ones are never shown or auto-selected.
+  const startedThreads = useMemo(() => (threads ? visibleThreads(threads) : undefined), [threads]);
   const { data: documents, isLoading: loadingDocuments } = useQuery<DocumentDTO[]>({
     queryKey: ["documents"],
     queryFn: listDocuments,
@@ -132,11 +133,15 @@ export const KnowledgeContent: React.FC = () => {
     queryFn: getKnowledgeIndexStatus,
     refetchInterval: 3000,
   });
+  // In draft mode no saved thread is open. Otherwise the selected one (even if it is still empty, e.g. right after
+  // the first send creates it), falling back to the most recent started conversation.
   const selectedThread = useMemo(
-    () => threads?.find((thread) => thread.id === selectedThreadId) ?? threads?.[0],
-    [selectedThreadId, threads]
+    () => (draft ? undefined : threads?.find((thread) => thread.id === selectedThreadId) ?? startedThreads?.[0]),
+    [draft, selectedThreadId, threads, startedThreads]
   );
   const activeThreadId = selectedThread?.id ?? "";
+  const scope: KnowledgeScope = draft?.scope ?? selectedThread?.scope ?? "all_meetings";
+  const scopeMeetingId = draft ? draft.meetingId : selectedThread?.meeting_id ?? null;
   const { data: persistedMessages = [] } = useQuery<KnowledgeMessageDTO[]>({
     queryKey: ["knowledgeMessages", activeThreadId],
     queryFn: () => listKnowledgeMessages(activeThreadId),
@@ -144,16 +149,15 @@ export const KnowledgeContent: React.FC = () => {
   });
   const messages = persistedMessages.concat(localMessages.filter((message) => message.thread_id === activeThreadId));
 
-  // The conversation list lives in the app sidebar; keep the fixed scope in step with whichever thread it opens.
+  // With no draft and nothing selected, open the most recent started conversation.
   useEffect(() => {
-    if (selectedThread) setScope(selectedThread.scope);
-  }, [selectedThread?.id, selectedThread?.scope]);
+    if (draft || !threads || !startedThreads?.[0]) return;
+    if (!threads.some((thread) => thread.id === selectedThreadId)) setSelectedThreadId(startedThreads[0].id);
+  }, [draft, selectedThreadId, threads, startedThreads]);
+  // A different (draft) conversation starts from a clean slate.
   useEffect(() => {
-    if (threads?.[0] && !threads.some((thread) => thread.id === selectedThreadId)) {
-      setSelectedThreadId(threads[0].id);
-      setScope(threads[0].scope);
-    }
-  }, [selectedThreadId, threads]);
+    setLocalMessages([]);
+  }, [draft?.scope, draft?.meetingId]);
   useEffect(() => () => {
     if (timer.current !== null) window.clearInterval(timer.current);
   }, []);
@@ -164,21 +168,16 @@ export const KnowledgeContent: React.FC = () => {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, lastMessageLength, activeThreadId]);
 
-  const newThread = async (nextScope: KnowledgeScope) => {
-    const meetingId = nextScope === "this_meeting" ? selectedThread?.meeting_id : null;
+  // Changing the scope starts a new, empty conversation. Nothing is created until its first message is sent.
+  const changeScope = (nextScope: KnowledgeScope) => {
+    const meetingId = nextScope === "this_meeting" ? scopeMeetingId : null;
     if (nextScope === "this_meeting" && !meetingId) {
       setError("Choose “Ask about this meeting” from a meeting detail view to use this scope.");
       return;
     }
-    try {
-      // Reuses an existing empty conversation with this scope instead of piling up identical new ones.
-      await openKnowledgeThread(queryClient, threads ?? [], nextScope, meetingId);
-      setScope(nextScope);
-      setLocalMessages([]);
-      setError(null);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "A Knowledge conversation could not be created.");
-    }
+    startKnowledgeDraft(nextScope, meetingId);
+    setLocalMessages([]);
+    setError(null);
   };
 
   const send = async (event: React.FormEvent) => {
@@ -186,15 +185,14 @@ export const KnowledgeContent: React.FC = () => {
     const query = inputQuery.trim();
     if (!query || streamingId) return;
     let threadId = activeThreadId;
+    let createdForThisMessage = false;
     if (!threadId) {
+      // First message of a new conversation: this is the moment it comes into existence.
       try {
-        const thread = await createKnowledgeThread(
-          scope,
-          scope === "this_meeting" ? selectedThread?.meeting_id : null
-        );
+        const thread = await createThreadForFirstMessage(queryClient, scope, scope === "this_meeting" ? scopeMeetingId : null);
         threadId = thread.id;
+        createdForThisMessage = true;
         setSelectedThreadId(thread.id);
-        await queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : "A Knowledge conversation could not be created.");
         return;
@@ -232,6 +230,12 @@ export const KnowledgeContent: React.FC = () => {
       }, 18);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The selected provider could not answer.");
+      if (createdForThisMessage) {
+        // Nothing was answered: drop the empty conversation, return to the draft, and keep the question.
+        void discardIfEmpty(queryClient, threadId);
+        startKnowledgeDraft(scope, scope === "this_meeting" ? scopeMeetingId : null);
+        setInputQuery(query);
+      }
     }
   };
 
@@ -261,7 +265,7 @@ export const KnowledgeContent: React.FC = () => {
     event.preventDefault();
     if (!searchQuery.trim()) return;
     try {
-      setSearchResults(await searchKnowledge(scope, searchQuery.trim(), selectedThread?.meeting_id));
+      setSearchResults(await searchKnowledge(scope, searchQuery.trim(), scopeMeetingId));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Semantic search is unavailable.");
     }
@@ -289,7 +293,7 @@ export const KnowledgeContent: React.FC = () => {
         <main className="md:col-span-8 xl:col-span-9 flex flex-col min-h-0">
           <div className="min-h-12 px-1 pt-1.5 pb-3 flex flex-wrap items-center justify-between gap-3">
             <label className="flex items-center gap-2 text-xs">
-              <span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Scope</span><select value={scope} onChange={(event) => void newThread(event.target.value as KnowledgeScope)} className="h-8 pl-3 pr-2 rounded-full border border-border bg-surface-hover text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent">{Object.entries(scopeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="flex items-center gap-2 text-xs">
+              <span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Scope</span><select value={scope} onChange={(event) => changeScope(event.target.value as KnowledgeScope)} className="h-8 pl-3 pr-2 rounded-full border border-border bg-surface-hover text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent">{Object.entries(scopeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="flex items-center gap-2 text-xs">
               <span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Destination</span>
               <select aria-label="Chat provider destination" className="h-8 pl-3 pr-2 rounded-full border border-border bg-surface-hover text-xs text-ink">
                 <option>Local · llama-server</option>

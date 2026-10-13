@@ -78,7 +78,7 @@ export const AppShell: React.FC = () => {
   }, [navigate]);
 
   return (
-    <div className="min-h-screen flex bg-bg text-ink font-sans antialiased">
+    <div className="h-screen overflow-hidden flex bg-bg text-ink font-sans antialiased">
       {backgroundNotice && recordingState !== "idle" && (
         <div className="fixed top-3 left-1/2 z-50 -translate-x-1/2 flex items-center gap-3 rounded-full border border-border bg-surface-elevated px-4 py-2 text-xs shadow-lg" role="status">
           <span>Capture is still running in the background.</span>
@@ -91,7 +91,7 @@ export const AppShell: React.FC = () => {
       <Sidebar />
 
       {/* Main Workspace Area */}
-      <main className="flex-1 flex flex-col min-w-0 bg-bg overflow-x-hidden">
+      <main className="flex-1 flex flex-col min-w-0 min-h-0 bg-bg overflow-x-hidden overflow-y-auto">
         <Outlet />
       </main>
 

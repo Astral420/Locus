@@ -18,7 +18,7 @@ import { useUiStore } from "../../stores/uiStore";
 import { useRecordingStore } from "../../stores/recordingStore";
 import { useKnowledgeStore } from "../../stores/knowledgeStore";
 import { deleteKnowledgeThread, listKnowledgeThreads, listModels, type KnowledgeThreadDTO, type ModelAssetDTO } from "../../lib/tauri";
-import { KNOWLEDGE_SCOPE_LABELS, openKnowledgeThread } from "../../lib/knowledgeThreads";
+import { KNOWLEDGE_SCOPE_LABELS, startKnowledgeDraft, visibleThreads } from "../../lib/knowledgeThreads";
 import { hasOverlayTitleBar } from "../../lib/platform";
 import { Kbd } from "../ui/Kbd";
 import { Popover } from "../ui/Popover";
@@ -227,22 +227,26 @@ const ConversationList: React.FC<{ currentPath: string }> = ({ currentPath }) =>
   const queryClient = useQueryClient();
   const selectedThreadId = useKnowledgeStore((s) => s.selectedThreadId);
   const setSelectedThreadId = useKnowledgeStore((s) => s.setSelectedThreadId);
-  const { data: threads = [] } = useQuery<KnowledgeThreadDTO[]>({
+  const draft = useKnowledgeStore((s) => s.draft);
+  const { data: allThreads = [] } = useQuery<KnowledgeThreadDTO[]>({
     queryKey: ["knowledgeThreads"],
     queryFn: listKnowledgeThreads,
   });
+  // Only conversations that have actually been started are listed.
+  const threads = visibleThreads(allThreads);
 
   const [pendingDelete, setPendingDelete] = useState<KnowledgeThreadDTO | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const onKnowledge = currentPath === "/knowledge" || currentPath.startsWith("/knowledge/");
-  const effectiveId = selectedThreadId ?? threads[0]?.id ?? null;
+  // A blank draft highlights nothing: it is not a saved conversation yet.
+  const effectiveId = draft ? null : selectedThreadId ?? threads[0]?.id ?? null;
 
+  // "+" only takes you to a blank Knowledge Base conversation; nothing is created or listed until you send a message.
   const startNew = () => {
-    void openKnowledgeThread(queryClient, threads, "all_meetings", null)
-      .then(() => navigate({ to: "/knowledge" }))
-      .catch(() => undefined);
+    startKnowledgeDraft("all_meetings", null);
+    void navigate({ to: "/knowledge" });
   };
 
   const closeDeleteDialog = () => {

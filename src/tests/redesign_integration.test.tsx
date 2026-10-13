@@ -24,7 +24,7 @@ const MEETING_TITLE = "Q3 Architecture & Offline RAG Sync";
 
 beforeEach(() => {
   localStorage.clear();
-  useUiStore.setState({ theme: "system", sidebarCollapsed: false });
+  useUiStore.setState({ theme: "system", sidebarCollapsed: false, modelsInstalledOnly: false });
   useRecordingStore.setState({
     state: "idle",
     elapsed_seconds: 0,
@@ -170,6 +170,79 @@ describe("Integration: Meeting Detail", () => {
     await h1(new RegExp(MEETING_TITLE));
     fireEvent.click(screen.getByRole("button", { name: "Back to meeting library" }));
     expect(await h1("Meetings")).toBeTruthy();
+  });
+});
+
+describe("Model Manager: Installed only switch", () => {
+  const model = (id: string, name: string, role: tauri.ModelAssetDTO["role"], status: tauri.ModelAssetDTO["status"]): tauri.ModelAssetDTO => ({
+    id, name, role, status,
+    parameter_size: "1B", memory_ram: "1 GB", memory_vram: "1 GB", disk_size: "1 GB",
+  });
+  const catalog = [
+    model("w-bundled", "Whisper Small", "whisper", "bundled"),
+    model("w-base", "Whisper Base", "whisper", "available"),
+    model("w-med", "Whisper Medium", "whisper", "installed"),
+    model("w-large", "Whisper Large", "whisper", "downloading"),
+    model("w-act", "Whisper Tiny", "whisper", "active"),
+    model("l-1", "Llama Available", "llm", "available"),
+  ];
+  const switchEl = () => screen.getByRole("switch", { name: "Show installed models only" });
+
+  beforeEach(() => {
+    localStorage.removeItem("locus_models_installed_only");
+    vi.mocked(tauri.listModels).mockResolvedValue(catalog);
+  });
+
+  it("is a pill switch that is off by default and lists every model", async () => {
+    renderApp("/models");
+    await screen.findByText("Whisper Small");
+    expect(switchEl().getAttribute("aria-checked")).toBe("false");
+    for (const name of ["Whisper Small", "Whisper Base", "Whisper Medium", "Whisper Large", "Whisper Tiny"]) {
+      expect(screen.getByText(name)).toBeTruthy();
+    }
+  });
+
+  it("when on, shows only models already on this machine (bundled, installed, active)", async () => {
+    renderApp("/models");
+    await screen.findByText("Whisper Small");
+    fireEvent.click(switchEl());
+    expect(switchEl().getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByText("Whisper Small")).toBeTruthy();
+    expect(screen.getByText("Whisper Medium")).toBeTruthy();
+    expect(screen.getByText("Whisper Tiny")).toBeTruthy();
+    // not installed: an available download and one that is still downloading
+    expect(screen.queryByText("Whisper Base")).toBeNull();
+    expect(screen.queryByText("Whisper Large")).toBeNull();
+    // and it can be turned back off
+    fireEvent.click(switchEl());
+    expect(screen.getByText("Whisper Base")).toBeTruthy();
+  });
+
+  it("shows how many are installed in the current category", async () => {
+    renderApp("/models");
+    await screen.findByText("Whisper Small");
+    expect(within(switchEl().closest("label") as HTMLElement).getByText("3")).toBeTruthy();
+  });
+
+  it("filters each category on its own and explains an empty result", async () => {
+    renderApp("/models");
+    await screen.findByText("Whisper Small");
+    fireEvent.click(switchEl());
+    fireEvent.click(screen.getByRole("button", { name: "Summarization (llama-server)" }));
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.getByText(/No summarization models are installed yet/)).toBeTruthy();
+    expect(screen.queryByText("Llama Available")).toBeNull();
+    fireEvent.click(switchEl()); // off: the available model comes back and the message goes away
+    expect(await screen.findByText("Llama Available")).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("remembers the choice between launches", async () => {
+    renderApp("/models");
+    await screen.findByText("Whisper Small");
+    fireEvent.click(switchEl());
+    expect(localStorage.getItem("locus_models_installed_only")).toBe("true");
+    expect(useUiStore.getState().modelsInstalledOnly).toBe(true);
   });
 });
 

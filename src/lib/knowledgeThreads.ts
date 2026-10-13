@@ -1,5 +1,11 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { createKnowledgeThread, type KnowledgeScope, type KnowledgeThreadDTO } from "./tauri";
+import {
+  createKnowledgeThread,
+  deleteKnowledgeThread,
+  listKnowledgeThreads,
+  type KnowledgeScope,
+  type KnowledgeThreadDTO,
+} from "./tauri";
 import { useKnowledgeStore } from "../stores/knowledgeStore";
 
 export const KNOWLEDGE_SCOPE_LABELS: Record<KnowledgeScope, string> = {
@@ -9,21 +15,39 @@ export const KNOWLEDGE_SCOPE_LABELS: Record<KnowledgeScope, string> = {
   everything: "Everything",
 };
 
+/** A conversation counts (and is listed in the sidebar) only once something has actually been asked. */
+export const visibleThreads = (threads: KnowledgeThreadDTO[]): KnowledgeThreadDTO[] =>
+  threads.filter((thread) => thread.message_count > 0);
+
 /**
- * Open a conversation with the given fixed scope. An existing empty conversation with the same scope (and meeting)
- * is reused instead of creating another identical one, so repeated "+" clicks or scope toggles never pile up empties.
+ * Start a new, empty conversation with the given fixed scope. This only switches the page into draft mode:
+ * no thread is created and nothing is added to the sidebar until the first message is sent.
  */
-export async function openKnowledgeThread(
+export function startKnowledgeDraft(scope: KnowledgeScope, meetingId?: string | null): void {
+  useKnowledgeStore.getState().startDraft(scope, meetingId ?? null);
+}
+
+/** Creating the thread is deferred to the first send; callers use this right before sending. */
+export async function createThreadForFirstMessage(
   queryClient: QueryClient,
-  threads: KnowledgeThreadDTO[],
   scope: KnowledgeScope,
   meetingId: string | null | undefined
 ): Promise<KnowledgeThreadDTO> {
-  const reusable = threads.find(
-    (t) => t.message_count === 0 && t.scope === scope && (t.meeting_id ?? null) === (meetingId ?? null)
-  );
-  const thread = reusable ?? (await createKnowledgeThread(scope, meetingId ?? null));
-  useKnowledgeStore.getState().setSelectedThreadId(thread.id);
-  if (!reusable) await queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
+  const thread = await createKnowledgeThread(scope, meetingId ?? null);
+  // Refresh before selecting so the page can find the thread it just created.
+  await queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
   return thread;
+}
+
+/** If the first send failed before anything was stored, remove the empty thread so it never lingers. */
+export async function discardIfEmpty(queryClient: QueryClient, threadId: string): Promise<void> {
+  try {
+    const current = await listKnowledgeThreads();
+    const thread = current.find((candidate) => candidate.id === threadId);
+    if (thread && thread.message_count === 0) await deleteKnowledgeThread(threadId);
+  } catch {
+    // best effort: an empty thread is hidden from the sidebar either way
+  } finally {
+    await queryClient.invalidateQueries({ queryKey: ["knowledgeThreads"] });
+  }
 }

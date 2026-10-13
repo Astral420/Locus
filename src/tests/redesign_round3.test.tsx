@@ -13,6 +13,8 @@ vi.mock("../lib/tauri", async (importOriginal) => {
     ...actual,
     listKnowledgeThreads: vi.fn(actual.listKnowledgeThreads),
     createKnowledgeThread: vi.fn(actual.createKnowledgeThread),
+    sendKnowledgeMessage: vi.fn(actual.sendKnowledgeMessage),
+    deleteKnowledgeThread: vi.fn(actual.deleteKnowledgeThread),
   };
 });
 const actualTauri = await vi.importActual<typeof import("../lib/tauri")>("../lib/tauri");
@@ -30,9 +32,13 @@ const thread = (over: Partial<tauri.KnowledgeThreadDTO> & { id: string }): tauri
 beforeEach(() => {
   localStorage.clear();
   useUiStore.setState({ sidebarCollapsed: false });
-  useKnowledgeStore.setState({ selectedThreadId: null });
-  vi.mocked(tauri.createKnowledgeThread).mockClear(); // call history is shared across tests
+  useKnowledgeStore.setState({ selectedThreadId: null, draft: null });
+  for (const fn of [tauri.createKnowledgeThread, tauri.sendKnowledgeMessage, tauri.deleteKnowledgeThread]) {
+    vi.mocked(fn).mockClear(); // call history is shared across tests
+  }
   vi.mocked(tauri.createKnowledgeThread).mockImplementation(actualTauri.createKnowledgeThread);
+  vi.mocked(tauri.sendKnowledgeMessage).mockImplementation(actualTauri.sendKnowledgeMessage);
+  vi.mocked(tauri.deleteKnowledgeThread).mockImplementation(actualTauri.deleteKnowledgeThread);
 });
 afterEach(() => {
   cleanup();
@@ -49,7 +55,7 @@ describe("Round 3: conversation history lives in the sidebar", () => {
   });
 
   it("scrolls inside the sidebar instead of stacking: many threads stay in a bounded, scrollable list", async () => {
-    const many = Array.from({ length: 40 }, (_, i) => thread({ id: `th-${i}` }));
+    const many = Array.from({ length: 40 }, (_, i) => thread({ id: `th-${i}`, message_count: 1 }));
     vi.mocked(tauri.listKnowledgeThreads).mockResolvedValue(many);
     renderApp("/");
     const list = await screen.findByRole("list", { name: "Conversation history" });
@@ -88,11 +94,8 @@ describe("Round 3: conversation history lives in the sidebar", () => {
     expect(within(sources).getByLabelText("Semantic search")).toBeTruthy();
   });
 
-  it("'+' reuses an existing empty conversation with the same scope instead of stacking another", async () => {
-    vi.mocked(tauri.listKnowledgeThreads).mockResolvedValue([
-      thread({ id: "busy", message_count: 3 }),
-      thread({ id: "empty", message_count: 0, scope: "all_meetings" }),
-    ]);
+  it("'+' only opens a blank Knowledge Base conversation: nothing is created and nothing is added to the sidebar", async () => {
+    vi.mocked(tauri.listKnowledgeThreads).mockResolvedValue([thread({ id: "busy", title: "Busy one", message_count: 3 })]);
     renderApp("/");
     const aside = await screen.findByLabelText("Primary navigation");
     await within(aside).findAllByRole("listitem");
@@ -100,34 +103,154 @@ describe("Round 3: conversation history lives in the sidebar", () => {
 
     expect(await h1("Knowledge Base")).toBeTruthy();
     expect(tauri.createKnowledgeThread).not.toHaveBeenCalled();
-    expect(useKnowledgeStore.getState().selectedThreadId).toBe("empty");
+    expect(useKnowledgeStore.getState().draft).toEqual({ scope: "all_meetings", meetingId: null });
+    expect(useKnowledgeStore.getState().selectedThreadId).toBeNull();
+    // still just the one real conversation, and it is not highlighted: the blank draft is what is open
+    expect(within(aside).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(aside).getByRole("button", { name: /Busy one/ }).getAttribute("aria-current")).toBeNull();
+    expect(await screen.findByText("Start a Knowledge inquiry")).toBeTruthy();
   });
 
-  it("'+' creates a conversation when none is empty, then opens it", async () => {
+  it("pressing '+' repeatedly never piles anything up", async () => {
     vi.mocked(tauri.listKnowledgeThreads).mockResolvedValue([thread({ id: "busy", message_count: 3 })]);
     renderApp("/");
     const aside = await screen.findByLabelText("Primary navigation");
     await within(aside).findAllByRole("listitem");
-    fireEvent.click(within(aside).getByRole("button", { name: "New conversation" }));
-
-    await waitFor(() => expect(tauri.createKnowledgeThread).toHaveBeenCalledWith("all_meetings", null));
-    expect(await h1("Knowledge Base")).toBeTruthy();
+    for (let i = 0; i < 3; i++) fireEvent.click(within(aside).getByRole("button", { name: "New conversation" }));
+    await h1("Knowledge Base");
+    expect(tauri.createKnowledgeThread).not.toHaveBeenCalled();
+    expect(within(aside).getAllByRole("listitem")).toHaveLength(1);
   });
 
-  it("changing scope on the page reuses an empty conversation of that scope rather than creating another", async () => {
+  it("changing scope creates nothing: it starts a blank conversation with that scope", async () => {
     vi.mocked(tauri.listKnowledgeThreads).mockResolvedValue([
       thread({ id: "t1", scope: "all_meetings", message_count: 1 }),
       thread({ id: "docs-empty", scope: "documents_only", message_count: 0 }),
     ]);
     renderApp("/knowledge");
     await h1("Knowledge Base");
-    await within(screen.getByLabelText("Primary navigation")).findByRole("button", { name: /docs-empty|New Knowledge inquiry/ }).catch(() => undefined);
-    await waitFor(() => expect(within(screen.getByLabelText("Primary navigation")).getAllByRole("listitem")).toHaveLength(2));
+    const aside = screen.getByLabelText("Primary navigation");
+    await waitFor(() => expect(within(aside).getAllByRole("listitem")).toHaveLength(1)); // the empty one is not listed
     const scope = (await screen.findByLabelText("Scope")) as HTMLSelectElement;
     fireEvent.change(scope, { target: { value: "documents_only" } });
+    fireEvent.change(scope, { target: { value: "everything" } });
 
-    await waitFor(() => expect(useKnowledgeStore.getState().selectedThreadId).toBe("docs-empty"));
+    await waitFor(() => expect(useKnowledgeStore.getState().draft?.scope).toBe("everything"));
+    expect((screen.getByLabelText("Scope") as HTMLSelectElement).value).toBe("everything");
     expect(tauri.createKnowledgeThread).not.toHaveBeenCalled();
+    expect(within(aside).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("conversations that never received a message are not listed in the sidebar", async () => {
+    vi.mocked(tauri.listKnowledgeThreads).mockResolvedValue([
+      thread({ id: "e1", message_count: 0 }),
+      thread({ id: "real", title: "Real chat", message_count: 2 }),
+      thread({ id: "e2", message_count: 0, scope: "documents_only" }),
+    ]);
+    renderApp("/");
+    const aside = await screen.findByLabelText("Primary navigation");
+    await waitFor(() => expect(within(aside).getAllByRole("listitem")).toHaveLength(1));
+    expect(within(aside).getByRole("button", { name: /Real chat/ })).toBeTruthy();
+    expect(within(aside).queryByText("New Knowledge inquiry")).toBeNull();
+  });
+
+  it("with only empty conversations the sidebar says there are none", async () => {
+    vi.mocked(tauri.listKnowledgeThreads).mockResolvedValue([thread({ id: "e1", message_count: 0 })]);
+    renderApp("/");
+    expect(await screen.findByText("No conversations yet")).toBeTruthy();
+  });
+
+  it("the first message is what creates the conversation, and only then does it appear in the sidebar", async () => {
+    let created = false;
+    let asked = false;
+    const fresh = () => thread({ id: "fresh", title: "What did we decide?", message_count: asked ? 2 : 0 });
+    vi.mocked(tauri.listKnowledgeThreads).mockImplementation(async () => [
+      thread({ id: "busy", title: "Busy one", message_count: 3 }),
+      ...(created ? [fresh()] : []),
+    ]);
+    vi.mocked(tauri.createKnowledgeThread).mockImplementation(async () => {
+      created = true;
+      return fresh();
+    });
+    vi.mocked(tauri.sendKnowledgeMessage).mockImplementation(async (threadId) => {
+      asked = true;
+      return {
+        id: "a1", thread_id: threadId, ordinal: 1, role: "assistant", content: "We decided to ship.",
+        state: "complete", provider_identity: "llama_server", model_identity: "m", created_at: "2026-10-12T00:00:00Z", citations: [],
+      };
+    });
+    renderApp("/");
+    const aside = await screen.findByLabelText("Primary navigation");
+    await within(aside).findAllByRole("listitem");
+    fireEvent.click(within(aside).getByRole("button", { name: "New conversation" }));
+    await h1("Knowledge Base");
+
+    // typing a question is not enough; nothing exists until it is sent
+    fireEvent.change(await screen.findByLabelText("Knowledge question"), { target: { value: "What did we decide?" } });
+    expect(tauri.createKnowledgeThread).not.toHaveBeenCalled();
+    expect(within(aside).getAllByRole("listitem")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(tauri.createKnowledgeThread).toHaveBeenCalledTimes(1));
+    expect(tauri.createKnowledgeThread).toHaveBeenCalledWith("all_meetings", null);
+    await waitFor(() => expect(tauri.sendKnowledgeMessage).toHaveBeenCalledWith("fresh", "What did we decide?"));
+    await waitFor(() => expect(within(aside).getAllByRole("listitem")).toHaveLength(2));
+    expect(useKnowledgeStore.getState().selectedThreadId).toBe("fresh");
+    expect(useKnowledgeStore.getState().draft).toBeNull();
+  });
+
+  it("if the first question cannot be answered, the empty conversation is removed and the question is kept", async () => {
+    let created = false;
+    vi.mocked(tauri.listKnowledgeThreads).mockImplementation(async () => [
+      thread({ id: "busy", message_count: 3 }),
+      ...(created ? [thread({ id: "fresh", message_count: 0 })] : []),
+    ]);
+    vi.mocked(tauri.createKnowledgeThread).mockImplementation(async () => {
+      created = true;
+      return thread({ id: "fresh", message_count: 0 });
+    });
+    vi.mocked(tauri.sendKnowledgeMessage).mockRejectedValue(new Error("No provider selected"));
+    vi.mocked(tauri.deleteKnowledgeThread).mockImplementation(async () => {
+      created = false;
+    });
+    renderApp("/");
+    const aside = await screen.findByLabelText("Primary navigation");
+    await within(aside).findAllByRole("listitem");
+    fireEvent.click(within(aside).getByRole("button", { name: "New conversation" }));
+    await h1("Knowledge Base");
+    fireEvent.change(await screen.findByLabelText("Knowledge question"), { target: { value: "hello?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(tauri.deleteKnowledgeThread).toHaveBeenCalledWith("fresh"));
+    expect(await screen.findByText(/No provider selected/)).toBeTruthy();
+    expect((screen.getByLabelText("Knowledge question") as HTMLInputElement).value).toBe("hello?");
+    expect(within(aside).getAllByRole("listitem")).toHaveLength(1);
+    expect(useKnowledgeStore.getState().draft).not.toBeNull();
+  });
+
+  it("opening a meeting does not create a conversation; its chat creates one only when a question is sent", async () => {
+    let created = false;
+    vi.mocked(tauri.createKnowledgeThread).mockImplementation(async (scope, meetingId) => {
+      created = true;
+      return thread({ id: "mt", scope, meeting_id: meetingId ?? null, message_count: 0 });
+    });
+    vi.mocked(tauri.sendKnowledgeMessage).mockImplementation(async (threadId) => ({
+      id: "a1", thread_id: threadId, ordinal: 1, role: "assistant", content: "ok", state: "complete",
+      provider_identity: null, model_identity: null, created_at: "2026-10-12T00:00:00Z", citations: [],
+    }));
+    renderApp("/meeting/m-01");
+    await h1(/Q3 Architecture/);
+    fireEvent.click(await screen.findByRole("button", { name: /^chat$/i }));
+    const input = await screen.findByPlaceholderText("Ask about this meeting…");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(tauri.createKnowledgeThread).not.toHaveBeenCalled();
+    expect(created).toBe(false);
+
+    fireEvent.change(input, { target: { value: "Who owns the sidecar work?" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+    await waitFor(() => expect(tauri.createKnowledgeThread).toHaveBeenCalledWith("this_meeting", "m-01"));
+    await waitFor(() => expect(tauri.sendKnowledgeMessage).toHaveBeenCalledWith("mt", "Who owns the sidecar work?"));
+    expect(tauri.createKnowledgeThread).toHaveBeenCalledTimes(1);
   });
 
   it("gives the scope bar breathing room so a focus ring is never clipped at the top", async () => {

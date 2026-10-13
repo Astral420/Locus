@@ -23,6 +23,9 @@ interface UiState {
   /** First-run "Offline-Ready Core Engine" notice: once closed it never returns. */
   coreEngineNoticeDismissed: boolean;
   dismissCoreEngineNotice: () => void;
+  /** Model Manager: show only models that are already on this machine. Remembered between launches. */
+  modelsInstalledOnly: boolean;
+  setModelsInstalledOnly: (installedOnly: boolean) => void;
   setDownloadStatus: (status: Partial<DownloadProgress>) => void;
   setActiveRecoveryModal: (open: boolean) => void;
 }
@@ -30,6 +33,7 @@ interface UiState {
 const STORAGE_KEY_THEME = "locus_theme_preference";
 const STORAGE_KEY_SIDEBAR = "locus_sidebar_collapsed";
 const STORAGE_KEY_CORE_NOTICE = "locus_core_engine_notice_dismissed";
+const STORAGE_KEY_MODELS_INSTALLED_ONLY = "locus_models_installed_only";
 
 function resolveEffectiveTheme(theme: ThemeMode): "light" | "dark" {
   if (theme === "system") {
@@ -53,6 +57,9 @@ const initialTheme: ThemeMode = (typeof localStorage !== "undefined" &&
 const initialCoreNoticeDismissed: boolean =
   (typeof localStorage !== "undefined" && localStorage.getItem(STORAGE_KEY_CORE_NOTICE) === "true") || false;
 
+const initialModelsInstalledOnly: boolean =
+  (typeof localStorage !== "undefined" && localStorage.getItem(STORAGE_KEY_MODELS_INSTALLED_ONLY) === "true") || false;
+
 const initialSidebar: boolean = (typeof localStorage !== "undefined" &&
   localStorage.getItem(STORAGE_KEY_SIDEBAR) === "true") || false;
 
@@ -64,6 +71,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   resolvedTheme: initialResolved,
   sidebarCollapsed: initialSidebar,
   coreEngineNoticeDismissed: initialCoreNoticeDismissed,
+  modelsInstalledOnly: initialModelsInstalledOnly,
   downloadStatus: {
     active: false,
     modelName: "",
@@ -94,6 +102,13 @@ export const useUiStore = create<UiState>((set, get) => ({
       localStorage.setItem(STORAGE_KEY_CORE_NOTICE, "true");
     }
     set({ coreEngineNoticeDismissed: true });
+  },
+
+  setModelsInstalledOnly: (installedOnly) => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY_MODELS_INSTALLED_ONLY, String(installedOnly));
+    }
+    set({ modelsInstalledOnly: installedOnly });
   },
 
   setSidebarCollapsed: (collapsed) => {

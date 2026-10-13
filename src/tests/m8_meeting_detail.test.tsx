@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -439,6 +439,60 @@ describe("M8.06: Slides Gallery Tab & OCR Snippets", () => {
     const retryBtn = screen.getByRole("button", { name: /retry ocr/i });
     fireEvent.click(retryBtn);
     expect(handleRetryOcr).toHaveBeenCalled();
+  });
+});
+
+describe("Transcript auto-scroll stays inside the transcript container", () => {
+  const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+  let scrollTo: ReturnType<typeof vi.fn>;
+  let scrollIntoView: ReturnType<typeof vi.fn>;
+  let originalScrollTo: unknown;
+  let originalScrollIntoView: unknown;
+
+  beforeEach(() => {
+    originalScrollTo = proto.scrollTo;
+    originalScrollIntoView = proto.scrollIntoView;
+    scrollTo = vi.fn();
+    scrollIntoView = vi.fn();
+    proto.scrollTo = scrollTo;
+    proto.scrollIntoView = scrollIntoView;
+  });
+  afterEach(() => {
+    proto.scrollTo = originalScrollTo;
+    proto.scrollIntoView = originalScrollIntoView;
+  });
+
+  const renderPlaying = () =>
+    render(<TranscriptView segments={MOCK_SEGMENTS} currentTime={875} onSeek={vi.fn()} />);
+
+  it("follows playback by scrolling the feed itself, never scrollIntoView (which moves the page)", () => {
+    renderPlaying();
+    const feed = screen.getByRole("feed");
+    expect(scrollTo).toHaveBeenCalled();
+    expect(scrollTo.mock.instances[0]).toBe(feed);
+    expect(scrollTo.mock.calls[0][0]).toMatchObject({ behavior: "smooth" });
+    expect(typeof scrollTo.mock.calls[0][0].top).toBe("number");
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake its own smooth scrolling for the user scrolling", () => {
+    renderPlaying();
+    const feed = screen.getByRole("feed");
+    // a scroll event that lands on the path the auto-scroll is animating along
+    fireEvent.scroll(feed, { target: { scrollTop: scrollTo.mock.calls[0][0].top } });
+    expect(screen.queryByRole("button", { name: /jump to currently playing segment/i })).toBeNull();
+  });
+
+  it("treats wheel and touch input as the user taking over", () => {
+    renderPlaying();
+    fireEvent.wheel(screen.getByRole("feed"));
+    expect(screen.getByRole("button", { name: /jump to currently playing segment/i })).toBeDefined();
+  });
+
+  it("falls back to setting scrollTop where scrollTo does not exist", () => {
+    proto.scrollTo = undefined;
+    renderPlaying();
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 });
 

@@ -27,7 +27,7 @@ const h1 = (name: string | RegExp) => screen.findByRole("heading", { level: 1, n
 beforeEach(() => {
   localStorage.clear();
   useUiStore.setState({ sidebarCollapsed: false });
-  useKnowledgeStore.setState({ selectedThreadId: null });
+  useKnowledgeStore.setState({ selectedThreadId: null, draft: null });
   vi.mocked(tauri.deleteMeeting).mockClear();
 });
 afterEach(() => {
@@ -160,6 +160,40 @@ describe("Round 5: Meeting Detail responds to window size", () => {
     expect(left.className).not.toMatch(/(^|\s)overflow-y-auto/); // not forced to scroll internally when stacked
     expect(right.className).toContain("min-h-[34rem]"); // stacked tab panel never collapses to a sliver
     expect(right.className).toContain("lg:min-h-0");
+  });
+
+  it("bounds the app shell to the window so the page itself never scrolls", async () => {
+    renderApp("/meeting/m-01");
+    await h1(new RegExp(meeting.title));
+    const main = document.querySelector("main") as HTMLElement;
+    const shell = main.parentElement as HTMLElement;
+    // `min-h-screen` let the shell grow with its content; the document scrolled and
+    // nothing inside (the transcript) was ever the scroller.
+    expect(shell.className).toContain("h-screen");
+    expect(shell.className).toContain("overflow-hidden");
+    expect(shell.className).not.toContain("min-h-screen");
+    expect(main.className).toContain("min-h-0");
+    expect(main.className).toContain("overflow-y-auto");
+  });
+
+  it("makes the transcript feed the only scroller on the transcript tab, other tabs scroll their panel", async () => {
+    renderApp("/meeting/m-01");
+    await h1(new RegExp(meeting.title));
+    const panelOf = () =>
+      (document.querySelector(".grid.lg\\:grid-cols-12") as HTMLElement).children[1].children[1] as HTMLElement;
+    // summary (default tab): the panel scrolls
+    expect(panelOf().className).toContain("overflow-y-auto");
+    fireEvent.click(screen.getByRole("button", { name: /^transcript$/i }));
+    await waitFor(() => expect(screen.getByRole("feed")).toBeDefined());
+    // transcript: the panel is a bounded flex column and the feed inside it scrolls
+    expect(panelOf().className).toContain("flex flex-col");
+    expect(panelOf().className).toContain("min-h-0");
+    expect(panelOf().className).not.toContain("overflow-y-auto");
+    expect(screen.getByRole("feed").className).toContain("overflow-y-auto");
+    // stacked layout: the right pane gets a bounded height so the transcript can scroll itself
+    const right = (document.querySelector(".grid.lg\\:grid-cols-12") as HTMLElement).children[1] as HTMLElement;
+    expect(right.className).toContain("h-[75vh]");
+    expect(right.className).toContain("lg:h-auto");
   });
 
   it("hides tab icons only in the cramped two-pane width range so all five tabs fit", async () => {
