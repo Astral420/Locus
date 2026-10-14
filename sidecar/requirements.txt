@@ -1,8 +1,18 @@
-# Runtime dependency set for the packaged sidecar. Versions are pinned after the
-# Python/PyTorch/pyannote feasibility run; foundation tests use stdlib fallbacks.
+# Python packages for the sidecar. scripts/setup-sidecar.sh installs these into .venv and then
+# installs rapidocr-onnxruntime with --no-deps: it depends on the full "opencv-python", which would
+# sit next to opencv-python-headless and clash, so its other requirements are listed here instead.
 numpy>=1.26,<3
 opencv-python-headless>=4.10,<5
-Pillow>=10,<12
-pytesseract>=0.3.13,<1
+Pillow>=10,<13
 chromadb>=0.5,<2
-pyannote.audio>=3.3,<4
+
+# Speaker detection (ONNX, no PyTorch). Models: scripts/fetch-diarization-models.sh
+sherpa-onnx>=1.12
+
+# Slide text recognition (RapidOCR carries its own models inside the wheel). Installed --no-deps, see above.
+onnxruntime>=1.17
+pyclipper>=1.3
+shapely>=2.0
+PyYAML>=6
+tqdm>=4
+six>=1.16

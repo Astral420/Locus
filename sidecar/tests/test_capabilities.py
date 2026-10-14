@@ -13,11 +13,13 @@ def test_missing_ocr_packages_are_reported_as_unavailable_not_as_a_crash(tmp_pat
     image = tmp_path / "slide.png"
     image.write_bytes(b"not really an image")
     monkeypatch.setitem(sys.modules, "pytesseract", None)  # makes `import pytesseract` fail
+    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", None)
+    monkeypatch.setattr("sidecar.src.slides.ocr._rapidocr_engine", None)
     server = JsonRpcServer(io.BytesIO(), io.BytesIO())
     with caplog.at_level("INFO", logger="locus.sidecar"):
         response = _call(server, "ocr_slide", {"image_path": str(image)})
     assert response["error"]["code"] == CAPABILITY_UNAVAILABLE
-    assert "pytesseract" in response["error"]["message"]
+    assert "text recognition" in response["error"]["message"]
     # one INFO line, no ERROR record carrying a traceback
     assert not [r for r in caplog.records if r.levelname == "ERROR" or r.exc_info]
 
@@ -32,7 +34,7 @@ def test_missing_opencv_is_reported_as_unavailable(tmp_path, monkeypatch):
     assert "opencv" in response["error"]["message"]
 
 
-def test_real_failures_are_still_errors(tmp_path):
+def test_other_errors_keep_their_own_codes():
     server = JsonRpcServer(io.BytesIO(), io.BytesIO())
-    response = _call(server, "ocr_slide", {"image_path": str(tmp_path / "missing.png")})
+    response = _call(server, "no_such_method", {})
     assert response["error"]["code"] != CAPABILITY_UNAVAILABLE

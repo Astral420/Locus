@@ -85,6 +85,15 @@ impl AppPaths {
         }
     }
 
+    /// Where the sidecar should look for models: the writable store first (what the user added),
+    /// then the ones shipped with the app. Read by `sidecar/src/resources.py`.
+    pub fn sidecar_environment(&self) -> Vec<(String, String)> {
+        let dirs = std::iter::once(self.models.clone()).chain(self.bundled_models.iter().cloned());
+        std::env::join_paths(dirs)
+            .map(|joined| vec![("LOCUS_MODEL_DIRS".to_owned(), joined.to_string_lossy().to_string())])
+            .unwrap_or_default()
+    }
+
     pub fn embedding_models(&self) -> PathBuf {
         self.models.join("embedding")
     }
@@ -314,6 +323,18 @@ mod tests {
         fs::create_dir_all(resources.path().join("_up_/models")).unwrap();
         fs::write(resources.path().join("_up_/models/ggml-small.bin"), b"m").unwrap();
         assert!(find_whisper_model(&paths, None, None).is_some());
+    }
+
+    #[test]
+    fn the_sidecar_is_told_where_models_live_user_store_first() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::for_root(root.path());
+        let environment = paths.sidecar_environment();
+        assert_eq!(environment.len(), 1);
+        assert_eq!(environment[0].0, "LOCUS_MODEL_DIRS");
+        let dirs: Vec<PathBuf> = std::env::split_paths(&environment[0].1).collect();
+        assert_eq!(dirs[0], paths.models);
+        assert!(dirs.contains(&paths.bundled_models[0]));
     }
 
     #[test]

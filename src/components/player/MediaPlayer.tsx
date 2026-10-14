@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Play,
   Pause,
@@ -13,7 +14,7 @@ import {
   Mic,
   Monitor,
 } from "lucide-react";
-import { safeConvertFileSrc } from "../../lib/tauri";
+import { isTauriEnvironment, safeConvertFileSrc } from "../../lib/tauri";
 
 export interface MediaPlayerProps {
   src?: string;
@@ -148,17 +149,71 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
     }
   };
 
-  // Toggle Fullscreen
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
-    }
-  };
+  // Fullscreen.
+  //
+  // In the desktop app the webview (WKWebView on macOS) does not enable the element Fullscreen API,
+  // so `requestFullscreen()` silently does nothing. There the app *window* goes fullscreen through
+  // Tauri and the player fills it. In a plain browser the standard Fullscreen API is used.
+  // State only changes when the change really happened (it used to flip even when the request failed).
+  const inDesktopApp = isTauriEnvironment();
+
+  const setFullscreen = useCallback(
+    async (next: boolean) => {
+      try {
+        if (inDesktopApp) {
+          await getCurrentWindow().setFullscreen(next);
+          setIsFullscreen(next);
+        } else if (next) {
+          await containerRef.current?.requestFullscreen();
+        } else if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        }
+      } catch {
+        // Not allowed or not supported: leave the player as it was.
+      }
+    },
+    [inDesktopApp]
+  );
+
+  const toggleFullscreen = () => void setFullscreen(!isFullscreen);
+
+  // Browser: follow the real fullscreen state (Esc, F11, other controls all end up here).
+  useEffect(() => {
+    if (inDesktopApp) return;
+    const sync = () => setIsFullscreen(document.fullscreenElement === containerRef.current);
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, [inDesktopApp]);
+
+  // Desktop app: Esc leaves fullscreen, and so does the window's own control (green button, Ctrl+Cmd+F).
+  useEffect(() => {
+    if (!inDesktopApp) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") void setFullscreen(false);
+    };
+    const resync = () => {
+      getCurrentWindow()
+        .isFullscreen()
+        .then(setIsFullscreen)
+        .catch(() => undefined);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", resync);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", resync);
+    };
+  }, [inDesktopApp, setFullscreen]);
+
+  // Never leave the whole window fullscreen behind when the player goes away (e.g. navigating elsewhere).
+  const fullscreenRef = useRef(false);
+  fullscreenRef.current = isFullscreen;
+  useEffect(
+    () => () => {
+      if (inDesktopApp && fullscreenRef.current) void getCurrentWindow().setFullscreen(false).catch(() => undefined);
+    },
+    [inDesktopApp]
+  );
 
   // Global Keyboard shortcuts when focusing player or studio (Space, Left/Right, Shift+Left/Right)
   useEffect(() => {
@@ -215,11 +270,19 @@ export const MediaPlayer: React.FC<MediaPlayerProps> = ({
       tabIndex={0}
       role="region"
       aria-label="Media player master controls"
-      className="relative flex flex-col rounded-2xl bg-black/95 text-white shadow-sm overflow-hidden select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      data-fullscreen={isFullscreen ? "true" : undefined}
+      className={`flex flex-col bg-black/95 text-white shadow-sm overflow-hidden select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+        // `fixed` and `relative` must never both be present: Tailwind emits `relative` later, so it would win.
+        isFullscreen && inDesktopApp ? "fixed inset-0 z-[100] rounded-none" : isFullscreen ? "relative rounded-none" : "relative rounded-2xl"
+      }`}
     >
       {/* Visual Canvas: Video Canvas OR Dedicated Audio Transport Card */}
       {hasVideo ? (
-        <div className="relative aspect-video w-full bg-black flex items-center justify-center overflow-hidden">
+        <div
+          className={`relative w-full bg-black flex items-center justify-center overflow-hidden ${
+            isFullscreen ? "flex-1 min-h-0" : "aspect-video"
+          }`}
+        >
           {mediaSrc ? (
             <video
               ref={videoRef}

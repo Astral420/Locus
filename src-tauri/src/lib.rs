@@ -80,10 +80,10 @@ fn build_state(app: &tauri::AppHandle) -> Result<AppState, Box<dyn std::error::E
         paths.create_directories()?;
     }
     let _ = deletion::retry_pending_cleanup(&database, &paths.media);
-    let sidecar = Arc::new(Mutex::new(SidecarManager::new(
-        paths.python.clone(),
-        paths.sidecar_root.clone(),
-    )));
+    let sidecar = Arc::new(Mutex::new(
+        SidecarManager::new(paths.python.clone(), paths.sidecar_root.clone())
+            .with_environment(paths.sidecar_environment()),
+    ));
     let embedding_models =
         EmbeddingModelManager::new(paths.embedding_models()).with_database(database.clone());
     let generation_models =

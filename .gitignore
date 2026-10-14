@@ -24,6 +24,9 @@ src-tauri/gen/
 .pytest_cache/
 src-tauri/media/
 
+models/diarization/
+.venv/
+
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

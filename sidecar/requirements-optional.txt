@@ -1,0 +1,3 @@
+# Alternatives that Locus uses when present; neither is needed for the default setup.
+pytesseract>=0.3.13,<1   # + the Tesseract program, as a fallback text recognition engine
+pyannote.audio>=3.3,<4   # PyTorch based diarization; needs a local model (LOCUS_PYANNOTE_MODEL)

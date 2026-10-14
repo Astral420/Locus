@@ -174,9 +174,21 @@ pub fn sidecar_capability_missing(error: &SidecarError) -> bool {
     }
 }
 
+/// What the user reads when an optional add-on is missing. The technical reason (and how to fix it)
+/// goes to the log, not the interface.
+pub fn unavailable_message(step: &str) -> String {
+    match step {
+        "diarization" => "Speaker labels aren't available because speaker detection isn't installed on this computer.".into(),
+        "slides" => "Slides weren't detected because slide detection isn't installed on this computer.".into(),
+        "ocr" => "Slide text wasn't read because text recognition isn't installed on this computer.".into(),
+        other => format!("{other} isn't available on this computer."),
+    }
+}
+
 fn optional_sidecar_failure(step: &str, error: SidecarError) -> StepOutcome {
     if sidecar_capability_missing(&error) {
-        StepOutcome::Skipped(format!("{step} is unavailable: {error}"))
+        eprintln!("locus: {step} is unavailable: {error}");
+        StepOutcome::Skipped(unavailable_message(step))
     } else {
         StepOutcome::Failed(error.to_string())
     }
@@ -295,13 +307,63 @@ pub fn pick_indices(len: usize, max: usize) -> Vec<usize> {
 
 /// Whisper emits very little text when it is decoding noise or the wrong
 /// language. Speech this long with this few words is worth telling the user.
-pub fn transcript_density_warning(speech_seconds: f32, words: usize) -> Option<String> {
-    (speech_seconds >= 30.0 && (words as f32 / speech_seconds) < 0.4).then(|| {
-        format!(
-            " WARNING: only {words} words for {:.0}s of speech. Check the audio source, the language and the GPU setting.",
-            speech_seconds
-        )
-    })
+pub fn transcript_density_warning(speech_seconds: f32, words: usize) -> bool {
+    speech_seconds >= 30.0 && (words as f32 / speech_seconds) < 0.4
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LanguageBasis {
+    /// The user picked the language.
+    Chosen,
+    /// Detected from the audio, with this probability.
+    Detected(f32),
+    Unknown,
+}
+
+pub fn language_name(code: &str) -> String {
+    let name = match code {
+        "en" => "English", "es" => "Spanish", "fr" => "French", "de" => "German", "it" => "Italian",
+        "pt" => "Portuguese", "nl" => "Dutch", "ca" => "Catalan", "ru" => "Russian", "uk" => "Ukrainian",
+        "pl" => "Polish", "cs" => "Czech", "ro" => "Romanian", "hu" => "Hungarian", "el" => "Greek",
+        "sv" => "Swedish", "da" => "Danish", "no" => "Norwegian", "fi" => "Finnish", "tr" => "Turkish",
+        "ar" => "Arabic", "he" => "Hebrew", "fa" => "Persian", "hi" => "Hindi", "zh" => "Chinese",
+        "ja" => "Japanese", "ko" => "Korean", "th" => "Thai", "vi" => "Vietnamese", "id" => "Indonesian",
+        "tl" => "Tagalog",
+        _ => return code.to_uppercase(),
+    };
+    name.to_owned()
+}
+
+/// The one-line result a person sees for the transcription step. Technical detail
+/// (voice-activity source, device, model) is logged instead.
+pub fn describe_transcription(
+    passages: usize,
+    speech_seconds: f32,
+    words: usize,
+    language: Option<&str>,
+    basis: LanguageBasis,
+) -> String {
+    if passages == 0 {
+        return if speech_seconds <= 0.0 {
+            "No speech was found in this recording.".into()
+        } else {
+            "No words could be recognised in this recording.".into()
+        };
+    }
+    let noun = if passages == 1 { "passage" } else { "passages" };
+    let mut text = format!("Transcribed {passages} {noun}");
+    match (language, basis) {
+        (Some(code), LanguageBasis::Detected(probability)) if probability < 0.5 => text.push_str(&format!(
+            ". The language looks like {} but isn't certain; set it yourself and re-run if that's wrong.",
+            language_name(code)
+        )),
+        (Some(code), _) => text.push_str(&format!(" in {}.", language_name(code))),
+        (None, _) => text.push('.'),
+    }
+    if transcript_density_warning(speech_seconds, words) {
+        text.push_str(" Very little text was recognised for this much speech, so the language or the audio source may be wrong.");
+    }
+    text
 }
 
 /// Clips for language detection: a handful of the longer chunks spread over the
@@ -354,10 +416,7 @@ fn transcription(state: &AppState, job: &PipelineJob) -> StepOutcome {
     let mut collected: Vec<TranscriptSegment> = Vec::new();
     let mut device = String::from("no speech");
     let mut language: Option<String> = facts.language_selected.clone();
-    let mut language_note = language
-        .as_ref()
-        .map(|language| format!("language {language}, set by you"))
-        .unwrap_or_else(|| "language not detected".into());
+    let mut language_basis = if language.is_some() { LanguageBasis::Chosen } else { LanguageBasis::Unknown };
     if !chunks.is_empty() {
         let mut engine = match WhisperEngine::load(&model) {
             Ok(engine) => engine,
@@ -372,15 +431,7 @@ fn transcription(state: &AppState, job: &PipelineJob) -> StepOutcome {
             let clips = language_clips(&audio, &chunks);
             match engine.detect_language(&clips) {
                 Ok(Some(guess)) => {
-                    let percent = (guess.probability * 100.0).round();
-                    language_note = if guess.probability < 0.5 {
-                        format!(
-                            "language {} detected at only {percent}%; set the language and re-run if this is wrong",
-                            guess.language
-                        )
-                    } else {
-                        format!("language {} detected ({percent}%)", guess.language)
-                    };
+                    language_basis = LanguageBasis::Detected(guess.probability);
                     language = Some(guess.language);
                 }
                 Ok(None) => {}
@@ -417,7 +468,11 @@ fn transcription(state: &AppState, job: &PipelineJob) -> StepOutcome {
         return StepOutcome::Canceled;
     }
     let words: usize = segments.iter().map(|s| s.text.split_whitespace().count()).sum();
-    let warning = transcript_density_warning(speech_seconds, words).unwrap_or_default();
+    eprintln!(
+        "locus: transcription {meeting_id}: {} segments, {words} words, {vad_source}, {device}, language {:?}",
+        segments.len(),
+        language
+    );
     let model_name = model
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -428,9 +483,12 @@ fn transcription(state: &AppState, job: &PipelineJob) -> StepOutcome {
         language.as_deref(),
         &segments,
     ) {
-        Ok(_) => StepOutcome::Done(Some(format!(
-            "{} segments ({vad_source}, {device}, {language_note}).{warning}",
-            segments.len()
+        Ok(_) => StepOutcome::Done(Some(describe_transcription(
+            segments.len(),
+            speech_seconds,
+            words,
+            language.as_deref(),
+            language_basis,
         ))),
         Err(error) => StepOutcome::Failed(error),
     }
@@ -455,9 +513,12 @@ fn diarization_step(state: &AppState, job: &PipelineJob) -> StepOutcome {
         diarization::diarize(client, &audio_str, facts.single_person_mic)
     });
     match outcome {
-        Err(error) => optional_sidecar_failure("Speaker diarization", error),
+        Err(error) => optional_sidecar_failure("diarization", error),
         Ok(DiarizationOutcome::Unavailable(reason)) => {
-            StepOutcome::Skipped(format!("Speaker diarization is unavailable: {reason}"))
+        {
+            eprintln!("locus: diarization is unavailable: {reason}");
+            StepOutcome::Skipped(unavailable_message("diarization"))
+        }
         }
         Ok(DiarizationOutcome::Segments(segments)) if segments.is_empty() => {
             StepOutcome::Skipped("No distinct speakers were detected.".into())
@@ -472,7 +533,11 @@ fn diarization_step(state: &AppState, job: &PipelineJob) -> StepOutcome {
                 .collect::<std::collections::BTreeSet<_>>()
                 .len();
             match diarization::persist_alignments(&state.database, meeting_id, &segments) {
-                Ok(()) => StepOutcome::Done(Some(format!("{speakers} speaker(s)"))),
+                Ok(()) => StepOutcome::Done(Some(if speakers == 1 {
+                    "1 speaker detected.".to_owned()
+                } else {
+                    format!("{speakers} speakers detected.")
+                })),
                 Err(error) => StepOutcome::Failed(error),
             }
         }
@@ -509,16 +574,17 @@ fn slide_extraction(state: &AppState, job: &PipelineJob) -> StepOutcome {
     });
     let detected = match detected {
         Ok(detected) => detected,
-        Err(error) => return optional_sidecar_failure("Slide detection", error),
+        Err(error) => return optional_sidecar_failure("slides", error),
     };
     if !state.pipeline.is_current(job) {
         return StepOutcome::Canceled;
     }
     match slides::persist_detected(&state.database, &state.paths.media, meeting_id, &detected) {
-        Ok(unique) => StepOutcome::Done(Some(format!(
-            "{unique} unique slide(s), {} view(s)",
-            detected.len()
-        ))),
+        Ok(unique) => StepOutcome::Done(Some(match unique {
+            0 => "No slides were found.".to_owned(),
+            1 => "1 slide found.".to_owned(),
+            n => format!("{n} slides found."),
+        })),
         Err(error) => StepOutcome::Failed(error),
     }
 }
@@ -550,7 +616,7 @@ fn ocr(state: &AppState, job: &PipelineJob) -> StepOutcome {
             }
             // Nothing read yet: treat as "OCR is not available here", not as
             // many failed slides.
-            Err(error) if index == 0 => return optional_sidecar_failure("Slide text recognition", error),
+            Err(error) if index == 0 => return optional_sidecar_failure("ocr", error),
             Err(_) => failed += 1,
         }
         let _ = state
@@ -558,9 +624,9 @@ fn ocr(state: &AppState, job: &PipelineJob) -> StepOutcome {
             .set_progress(&job.id, (index + 1) as f32 / total as f32);
     }
     StepOutcome::Done(Some(if failed == 0 {
-        format!("{total} slide(s) read")
+        format!("Text read from {total} {}.", if total == 1 { "slide" } else { "slides" })
     } else {
-        format!("{} of {total} slide(s) read", total - failed)
+        format!("Text read from {} of {total} slides.", total - failed)
     }))
 }
 
@@ -642,7 +708,9 @@ fn indexing(state: &AppState, job: &PipelineJob) -> StepOutcome {
             .pipeline
             .set_progress(&job.id, (index + 1) as f32 / sources.len().max(1) as f32);
     }
-    StepOutcome::Done(Some(format!("{} source(s) indexed", sources.len())))
+    StepOutcome::Done(Some(
+        if sources.is_empty() { "Nothing to add to search yet." } else { "Added to search." }.to_owned(),
+    ))
 }
 
 #[cfg(test)]
@@ -660,6 +728,45 @@ mod tests {
     }
 
     #[test]
+    fn transcription_result_reads_like_a_sentence() {
+        let d = |n, secs, words, lang: Option<&str>, basis| describe_transcription(n, secs, words, lang, basis);
+        assert_eq!(d(11, 80.0, 220, Some("en"), LanguageBasis::Detected(0.98)), "Transcribed 11 passages in English.");
+        assert_eq!(d(1, 12.0, 30, Some("es"), LanguageBasis::Chosen), "Transcribed 1 passage in Spanish.");
+        assert_eq!(d(4, 40.0, 100, None, LanguageBasis::Unknown), "Transcribed 4 passages.");
+        assert_eq!(d(0, 0.0, 0, None, LanguageBasis::Unknown), "No speech was found in this recording.");
+        assert_eq!(d(0, 25.0, 0, Some("en"), LanguageBasis::Chosen), "No words could be recognised in this recording.");
+        let unsure = d(5, 60.0, 150, Some("ca"), LanguageBasis::Detected(0.3));
+        assert!(unsure.contains("looks like Catalan") && unsure.contains("re-run"), "{unsure}");
+        let sparse = d(3, 120.0, 6, Some("en"), LanguageBasis::Detected(0.9));
+        assert!(sparse.starts_with("Transcribed 3 passages in English.") && sparse.contains("Very little text"));
+        // none of the engine jargon reaches the user
+        for text in [&unsure, &sparse] {
+            for jargon in ["VAD", "CPU", "GPU", "sidecar", "segments (", "%"] {
+                assert!(!text.contains(jargon), "{jargon} in {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn language_codes_become_names() {
+        assert_eq!(language_name("en"), "English");
+        assert_eq!(language_name("nl"), "Dutch");
+        assert_eq!(language_name("xx"), "XX");
+    }
+
+    #[test]
+    fn missing_add_ons_are_explained_without_technical_detail() {
+        for step in ["diarization", "slides", "ocr"] {
+            let message = unavailable_message(step);
+            for jargon in ["remote error", "-32001", "pip", "pytesseract", "pyannote", "sherpa", "Python"] {
+                assert!(!message.contains(jargon), "{jargon} in {message}");
+            }
+            assert!(message.ends_with("on this computer."), "{message}");
+        }
+        assert!(unavailable_message("ocr").starts_with("Slide text wasn't read"));
+    }
+
+    #[test]
     fn language_clips_are_spread_over_the_recording() {
         assert_eq!(pick_indices(0, 4), Vec::<usize>::new());
         assert_eq!(pick_indices(3, 4), vec![0, 1, 2]);
@@ -669,10 +776,10 @@ mod tests {
 
     #[test]
     fn sparse_output_for_long_speech_is_flagged() {
-        assert!(transcript_density_warning(120.0, 6).is_some());
-        assert!(transcript_density_warning(120.0, 240).is_none());
+        assert!(transcript_density_warning(120.0, 6));
+        assert!(!transcript_density_warning(120.0, 240));
         // too little audio to judge
-        assert!(transcript_density_warning(8.0, 0).is_none());
+        assert!(!transcript_density_warning(8.0, 0));
     }
 
     #[test]
@@ -729,13 +836,13 @@ mod tests {
         assert!(!sidecar_capability_missing(&SidecarError::Protocol(
             ProtocolError::Timeout(Duration::from_secs(1))
         )));
-        assert!(matches!(
-            optional_sidecar_failure("OCR", SidecarError::NotRunning),
-            StepOutcome::Skipped(_)
-        ));
+        assert_eq!(
+            optional_sidecar_failure("ocr", SidecarError::NotRunning),
+            StepOutcome::Skipped(unavailable_message("ocr"))
+        );
         assert!(matches!(
             optional_sidecar_failure(
-                "OCR",
+                "ocr",
                 SidecarError::Protocol(ProtocolError::Timeout(Duration::from_secs(1)))
             ),
             StepOutcome::Failed(_)

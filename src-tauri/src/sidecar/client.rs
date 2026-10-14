@@ -45,9 +45,19 @@ impl SidecarClient {
         python: &str,
         working_directory: impl AsRef<std::path::Path>,
     ) -> Result<Self, SidecarError> {
+        Self::spawn_with_environment(python, working_directory, &[])
+    }
+
+    /// `environment` is added to the sidecar's environment (e.g. where the models are).
+    pub fn spawn_with_environment(
+        python: &str,
+        working_directory: impl AsRef<std::path::Path>,
+        environment: &[(String, String)],
+    ) -> Result<Self, SidecarError> {
         let mut child = Command::new(python)
             .args(["-m", "sidecar.src.main"])
             .current_dir(working_directory)
+            .envs(environment.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -168,6 +178,7 @@ impl Drop for SidecarClient {
 pub struct SidecarManager {
     python: String,
     working_directory: std::path::PathBuf,
+    environment: Vec<(String, String)>,
     client: Option<SidecarClient>,
 }
 
@@ -179,13 +190,20 @@ impl SidecarManager {
         Self {
             python: python.into(),
             working_directory: working_directory.into(),
+            environment: Vec::new(),
             client: None,
         }
     }
 
+    /// Variables every spawned sidecar process receives.
+    pub fn with_environment(mut self, environment: Vec<(String, String)>) -> Self {
+        self.environment = environment;
+        self
+    }
+
     pub fn ensure_started(&mut self) -> Result<&mut SidecarClient, SidecarError> {
         if self.client.is_none() {
-            self.client = Some(SidecarClient::spawn(&self.python, &self.working_directory)?);
+            self.client = Some(SidecarClient::spawn_with_environment(&self.python, &self.working_directory, &self.environment)?);
         }
         let dead = self
             .client
@@ -197,7 +215,7 @@ impl SidecarManager {
             .is_some();
         if dead {
             self.shutdown();
-            self.client = Some(SidecarClient::spawn(&self.python, &self.working_directory)?);
+            self.client = Some(SidecarClient::spawn_with_environment(&self.python, &self.working_directory, &self.environment)?);
         }
         self.client.as_mut().ok_or(SidecarError::NotRunning)
     }

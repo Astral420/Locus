@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Main window: core defaults plus window dragging for the custom (overlay) title bar.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen"
+  ]
 }
