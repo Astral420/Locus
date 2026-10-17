@@ -9,7 +9,7 @@ Locus application code is MIT-licensed. The release process must replace each `u
 | ashpd / pipewire (Rust) | Linux screen portal and PipeWire streams | MIT; `Cargo.lock`. Links the system `libpipewire-0.3` (MIT) | Linux builds |
 | whisper.cpp / whisper-rs | Transcription | exact commit and license required | unverified |
 | pyannote community model | VAD and diarization | exact model revision and model license required | unverified |
-| Tesseract | OCR | exact binary and traineddata notices required | unverified |
+| RapidOCR + PP-OCR models (ONNX) | OCR | RapidOCR is Apache-2.0 and its models come from PaddleOCR (Apache-2.0); exact package version, model files and notices required | unverified |
 | llama.cpp / llama-server | Local generation and embeddings | exact commit and license required | unverified |
 | MoltenVK | Intel Mac Vulkan translation | Apache-2.0; exact SDK version required | unverified |
 

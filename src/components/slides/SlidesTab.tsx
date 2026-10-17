@@ -49,7 +49,7 @@ export const SlidesTab: React.FC<SlidesTabProps> = ({
     <div className="space-y-4" role="region" aria-label="Extracted Presentation Slides">
       {/* Header Info */}
       <div className="flex items-center justify-between text-xs text-ink-muted">
-        <span>Auto-detected slides via OpenCV frame differencing with Tesseract OCR</span>
+        <span>Auto-detected slides via OpenCV frame differencing with on-device text recognition (OCR)</span>
         <span className="font-mono">{slides.length} slides</span>
       </div>
 

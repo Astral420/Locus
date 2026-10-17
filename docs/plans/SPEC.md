@@ -128,7 +128,7 @@ Locus is an offline-first desktop application (macOS + Windows + Linux) that rec
 
 - **Desktop shell**: Tauri 2.11 with a React 19+ frontend rendered in the platform webview. Rust handles all backend orchestration, recording capture, transcription, database access, and process management.
 - **Python sidecar**: A PyInstaller-packaged standalone binary.
-  - **Sidecar responsibilities**: pyannote (VAD + diarization), OpenCV headless (slide detection), Tesseract (OCR), ChromaDB (vector storage for Knowledge Base).
+  - **Sidecar responsibilities**: pyannote (VAD + diarization), OpenCV headless (slide detection), RapidOCR (OCR), ChromaDB (vector storage for Knowledge Base).
   - **Sidecar lifecycle**: On-demand with warm-up. The sidecar starts lazily on first use (first pipeline run or first KB query) and stays running while the app is open. A ~3–5 second cold start is a benchmark target, not an established guarantee. Models are loaded on demand and may be unloaded under resource pressure. Validate cold-start targets on clean machines.
   - **OpenCV**: Uses `opencv-python-headless` to reduce sidecar size (no GUI dependencies).
 - **Communication protocol**: JSON-RPC 2.0 over Tauri's sidecar stdin/stdout pipes. Rust sends typed requests (`diarize`, `detect_slides`, `ocr_slide`), Python responds with results. Python can emit progress notifications (JSON-RPC notifications without `id`).
@@ -167,7 +167,7 @@ Locus is an offline-first desktop application (macOS + Windows + Linux) that rec
 ### Slide Extraction
 
 - **Detection**: OpenCV frame differencing in the Python sidecar. Runs as a post-recording batch job over the MP4 video. Detects slide transitions by comparing frame similarity, extracts unique slide frames as images.
-- **OCR**: Tesseract (via `pytesseract`) extracts text from each slide image. Bundled with PyInstaller.
+- **OCR**: RapidOCR (ONNX; its models ship inside the Python package) extracts text from each slide image. Bundled with PyInstaller; no external program or language data.
 - **Storage**: Slide images saved to disk. Metadata (timestamp, image path, OCR text) stored in SQLite.
 
 ### Summarization
@@ -219,7 +219,7 @@ Locus is an offline-first desktop application (macOS + Windows + Linux) that rec
 - **License**: MIT for original Locus code. Preserve separate code/model notices, exact versions and applicable redistribution obligations in packaged artifacts.
 - **Platforms**: macOS 13+ Apple Silicon/Intel (DMG + Homebrew; universal only if all native dependencies qualify), Windows x64 installers with qualified GPU variants as needed and CPU fallback, Linux AppImage + Flatpak on validated PipeWire/portal desktops. Exact native packaging must pass DESIGN's feasibility gates.
 - **Auto-update**: One stable release channel, no maintained public beta channel. Check only when enabled/online, verify signed artifacts and install with user action while capture/data-changing jobs are idle. Package-manager installs follow their supported update mechanism; manual verified release installation remains available.
-- **Bundled assets**: FFmpeg, standard Whisper small, verified pyannote dependencies/model assets, Tesseract executable/traineddata, Python sidecar with ChromaDB, llama-server. Provision generation and embedding weights separately. Validate runtime independence from Python installations, network access and developer caches.
+- **Bundled assets**: FFmpeg, standard Whisper small, verified pyannote dependencies/model assets, Python sidecar (including the RapidOCR models) with ChromaDB, llama-server. Provision generation and embedding weights separately. Validate runtime independence from Python installations, network access and developer caches.
 
 ## Behavioral Contracts
 
@@ -331,7 +331,7 @@ The following are explicitly **not** in v1 and are deferred to future versions:
 
 These require measurements or runnable proof, not another product interview. Record exact versions, artifacts and results before dependent implementation proceeds; any necessary product change returns to the maintainer with evidence.
 
-- Clean-machine packaging: compatible Python/PyTorch/pyannote/ChromaDB/PyInstaller versions, model redistribution, no runtime token/network requirement for bundled features, Tesseract binaries and language data. Do not hard-pin Python 3.14 without proof that the complete dependency set works.
+- Clean-machine packaging: compatible Python/PyTorch/pyannote/ChromaDB/PyInstaller versions, model redistribution, no runtime token/network requirement for bundled features. Do not hard-pin Python 3.14 without proof that the complete dependency set works.
 - Platform media: macOS 13 system audio plus microphone path; Windows Graphics Capture + WASAPI; Linux PipeWire audio and working screen portal. Distribution names alone do not establish capability.
 - FFmpeg: exact minimal build, H.264/AAC compatibility, usable hardware and distributable fallback encoders, recovery segments and ≤5-second crash-loss target under declared disk/fsync conditions.
 - GPU: CPU correctness baseline and actual packaged backend initialization/fallback; Intel/AMD llama.cpp PR #19527 concerns Metal and is distinct from MoltenVK. Pin a fork/commit only if a measured spike establishes its need. Prebuilt artifacts require checksums and reproducible build recipes.

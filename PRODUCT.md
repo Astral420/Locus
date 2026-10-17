@@ -21,7 +21,7 @@ Locus is an open-source, offline-first desktop meeting recorder and knowledge li
 
 ## Positioning
 
-Unlike cloud-based meeting recorders (such as Otter or Fireflies) that force sensitive enterprise audio onto third-party servers, require recurring monthly subscriptions, and lock users into proprietary silos, Locus executes transcription (whisper-rs), speaker diarization (pyannote), slide extraction (OpenCV + Tesseract), and local LLM inference (llama-server) entirely on the user's workstation. Data remains stored in standard open formats (MP4, SQLite, Markdown, JSON) with zero telemetry and zero mandatory internet access.
+Unlike cloud-based meeting recorders (such as Otter or Fireflies) that force sensitive enterprise audio onto third-party servers, require recurring monthly subscriptions, and lock users into proprietary silos, Locus executes transcription (whisper-rs), speaker diarization (pyannote), slide extraction (OpenCV + RapidOCR), and local LLM inference (llama-server) entirely on the user's workstation. Data remains stored in standard open formats (MP4, SQLite, Markdown, JSON) with zero telemetry and zero mandatory internet access.
 
 ## Operating Context
 

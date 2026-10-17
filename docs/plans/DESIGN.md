@@ -53,7 +53,7 @@ graph TB
     subgraph "Python Sidecar (PyInstaller)"
         PA[pyannote<br/>VAD + Diarization]
         CV[OpenCV<br/>Slide Detection]
-        TS[Tesseract OCR<br/>Slide Text]
+        TS[RapidOCR<br/>Slide Text]
         CHR[ChromaDB<br/>Vector Store]
     end
 
@@ -89,7 +89,7 @@ graph TB
 | **LLM Engine** | Summarization & Embeddings (llama-server subprocess) | N/A |
 
 > [!IMPORTANT]
-> **Python sidecar** — The sidecar handles ML workloads (pyannote VAD + diarization, OpenCV headless slide detection, Tesseract OCR) and vector storage (ChromaDB). It starts on-demand with warm-up and stays running while the app is open. Communication is JSON-RPC 2.0 over Tauri's sidecar stdin/stdout protocol.
+> **Python sidecar** — The sidecar handles ML workloads (pyannote VAD + diarization, OpenCV headless slide detection, RapidOCR) and vector storage (ChromaDB). It starts on-demand with warm-up and stays running while the app is open. Communication is JSON-RPC 2.0 over Tauri's sidecar stdin/stdout protocol.
 
 ---
 
@@ -127,7 +127,7 @@ graph TB
 |-----------|-----------|-------|
 | Diarization | **pyannote-audio** | `pyannote/speaker-diarization-community-1` model bundled. Also provides VAD. |
 | Slide detection | **OpenCV** (`opencv-python-headless`) | Headless build — no GUI dependencies, reduced size |
-| OCR | **Tesseract** (`pytesseract`) | Text extraction from slide frames |
+| OCR | **RapidOCR** (`rapidocr-onnxruntime`) | Text extraction from slide frames |
 | Vector storage | **ChromaDB** | Embedded vector database for Knowledge Base, persists to disk |
 | Packaging | **PyInstaller** | Standalone binary, no user-visible Python |
 
@@ -475,7 +475,7 @@ locus/
 │   │   ├── slides/               # Slide extraction pipeline
 │   │   │   ├── __init__.py
 │   │   │   ├── detector.py       # OpenCV frame differencing
-│   │   │   └── ocr.py            # Tesseract text extraction
+│   │   │   └── ocr.py            # RapidOCR text extraction
 │   │   ├── vectordb/             # ChromaDB integration
 │   │   │   ├── __init__.py
 │   │   │   └── store.py          # ChromaDB storage and query
@@ -583,7 +583,7 @@ All three platforms are required for v1.0. Build the full feature set on macOS f
 
 ### Packaging and release gates
 
-- Include all required FFmpeg, Whisper small, pyannote, Tesseract executable/language data, sidecar and llama-server assets for bundled offline features. Generation/embedding models are provisioned separately. No developer Python, caches, credentials or network access may be needed for bundled functionality.
+- Include all required FFmpeg, Whisper small, pyannote, sidecar (with the RapidOCR models) and llama-server assets for bundled offline features. Generation/embedding models are provisioned separately. No developer Python, caches, credentials or network access may be needed for bundled functionality.
 - Saved media uses H.264/AAC MP4; internal PCM/resampling/mixing/decoded frames remain required. Verify hardware encoder paths and a distributable fallback before declaring a device supported.
 - Original Locus code is MIT. Retain exact code/model versions, corresponding notices and build provenance; verify redistribution and any required source obligations for the packaged artifacts. A format name or MIT application license does not establish dependency compliance.
 - Measure compressed installer and installed size separately; Whisper small is 466 MiB on disk. The previous ≤400 MB base estimate is withdrawn; the 4.5 GB full-footprint target is provisional and excludes separately downloaded models.
@@ -611,7 +611,7 @@ All three platforms are required for v1.0. Build the full feature set on macOS f
 - [ ] Voice Activity Detection (pyannote VAD, mixed track)
 - [ ] Transcription via whisper-rs (VAD-guided chunking, 5-min max, multi-backend GPU)
 - [ ] Diarization via pyannote (source-aware, multi-speaker mic by default, explicit personal-mic option)
-- [ ] Slide extraction (OpenCV headless) + OCR (Tesseract)
+- [ ] Slide extraction (OpenCV headless) + OCR (RapidOCR)
 - [ ] AI summarization (Llama.cpp + cloud APIs)
 - [ ] Keyword-based prompt routing + user override
 - [ ] Knowledge Base (ChromaDB, provisioned local embeddings, independent durable indexing, text document upload, cited fixed-scope chat)

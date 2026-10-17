@@ -153,7 +153,7 @@ impl PipelineOrchestrator {
         // A dependency is satisfied when it is done, or when it is an optional
         // step that ended without producing output (skipped, failed or
         // canceled). Otherwise one missing optional capability (no slides, no
-        // diarization model, no tesseract) would block the summary forever.
+        // diarization model, no text recognition) would block the summary forever.
         let satisfied: HashSet<String> = jobs
             .iter()
             .filter(|job| {

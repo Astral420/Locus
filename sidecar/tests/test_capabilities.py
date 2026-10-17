@@ -12,9 +12,8 @@ def _call(server, method, params):
 def test_missing_ocr_packages_are_reported_as_unavailable_not_as_a_crash(tmp_path, monkeypatch, caplog):
     image = tmp_path / "slide.png"
     image.write_bytes(b"not really an image")
-    monkeypatch.setitem(sys.modules, "pytesseract", None)  # makes `import pytesseract` fail
-    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", None)
-    monkeypatch.setattr("sidecar.src.slides.ocr._rapidocr_engine", None)
+    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", None)  # makes the import fail
+    monkeypatch.setattr("sidecar.src.slides.ocr._engine", None)
     server = JsonRpcServer(io.BytesIO(), io.BytesIO())
     with caplog.at_level("INFO", logger="locus.sidecar"):
         response = _call(server, "ocr_slide", {"image_path": str(image)})

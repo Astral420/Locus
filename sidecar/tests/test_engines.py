@@ -127,23 +127,29 @@ class _FakeRapid:
 
 
 def test_rapidocr_text_is_ordered_trimmed_and_filtered(tmp_path, monkeypatch):
-    monkeypatch.setattr(ocr_module, "_rapidocr_engine", _FakeRapid())
+    monkeypatch.setattr(ocr_module, "_engine", _FakeRapid())
     assert ocr_module.ocr_slide(str(tmp_path / "slide.png")) == "Quarterly Review\nNext steps"
 
 
-def test_rapidocr_is_preferred_over_tesseract(tmp_path, monkeypatch):
-    monkeypatch.setattr(ocr_module, "_rapidocr_engine", _FakeRapid())
-    monkeypatch.setitem(sys.modules, "pytesseract", None)  # would raise if it were consulted
-    assert "Quarterly Review" in ocr_module.ocr_slide(str(tmp_path / "x.png"))
-
-
-def test_no_engine_at_all_is_unavailable_not_a_crash(tmp_path, monkeypatch):
-    monkeypatch.setattr(ocr_module, "_rapidocr_engine", None)
+def test_without_rapidocr_text_recognition_is_unavailable_not_a_crash(tmp_path, monkeypatch):
+    monkeypatch.setattr(ocr_module, "_engine", None)
     monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", None)
-    monkeypatch.setitem(sys.modules, "pytesseract", None)
     with pytest.raises(CapabilityUnavailable) as error:
         ocr_module.ocr_slide(str(tmp_path / "x.png"))
     assert "text recognition" in str(error.value)
+
+
+def test_tesseract_is_not_a_fallback_even_when_it_is_installed(tmp_path, monkeypatch):
+    class _Tesseract:
+        def __getattr__(self, name):
+            raise AssertionError("Tesseract must never be consulted")
+
+    monkeypatch.setattr(ocr_module, "_engine", None)
+    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", None)
+    monkeypatch.setitem(sys.modules, "pytesseract", _Tesseract())
+    with pytest.raises(CapabilityUnavailable):
+        ocr_module.ocr_slide(str(tmp_path / "x.png"))
+    assert not hasattr(ocr_module, "_read_with_tesseract")
 
 
 def test_real_rapidocr_reads_a_rendered_slide(tmp_path):
@@ -158,6 +164,6 @@ def test_real_rapidocr_reads_a_rendered_slide(tmp_path):
     ImageDraw.Draw(image).text((60, 120), "Quarterly Architecture Review", fill=(0, 0, 0), font=ImageFont.truetype(font_path, 64))
     slide = tmp_path / "slide.png"
     image.save(slide)
-    ocr_module._rapidocr_engine = None
+    ocr_module._engine = None
     text = ocr_module.ocr_slide(str(slide))
     assert "Architecture" in text and "Review" in text

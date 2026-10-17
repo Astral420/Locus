@@ -21,7 +21,7 @@ Record exact versions and SHA-256 digests before publishing:
 - FFmpeg build and enabled codecs: `unverified`
 - Whisper small model: `unverified` (see `models/README.md`)
 - pyannote model and license: `unverified` (see `models/README.md`)
-- Tesseract executable and language data: `unverified`
+- RapidOCR package and bundled OCR models (exact versions, SHA-256): `unverified`
 - PyInstaller sidecar: `unverified`
 - llama-server and generation/embedding provisioning path: `unverified`
 - MoltenVK dylib for the Intel Vulkan variant: `unverified`

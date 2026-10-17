@@ -130,7 +130,7 @@ Both personas need:
 | FR4.1 | For recordings that include screen capture, the app shall detect slide transitions using OpenCV frame differencing | P1 |
 | FR4.2 | The app shall extract each unique slide as a separate image file | P1 |
 | FR4.3 | Each extracted slide shall be linked to its timestamp in the recording | P1 |
-| FR4.4 | The app shall extract text content from slide images using Tesseract OCR | P1 |
+| FR4.4 | The app shall extract text content from slide images using on-device OCR (RapidOCR) | P1 |
 | FR4.5 | Extracted slide text shall be included in the context sent to the LLM for summarization | P1 |
 | FR4.6 | Slide extraction shall run as a post-recording batch process (no impact on recording performance) | P0 |
 
@@ -278,7 +278,7 @@ Timing and size numbers are benchmark targets, not established results. Record e
 | ID | Requirement | Target |
 |----|------------|--------|
 | NFR13 | Measure compressed installer size and installed footprint separately. Standard bundled Whisper `small` alone is 466 MiB on disk; generation and embedding models are provisioned separately | Budget set from packaging measurements; previous 400 MB base estimate withdrawn |
-| NFR14 | Full app includes sidecar dependencies, pyannote assets and Tesseract data. Downloaded generation/embedding models are additional | Initial 4.5 GB installed-footprint target, unverified until packaging spike |
+| NFR14 | Full app includes sidecar dependencies, pyannote assets and OCR models (bundled inside the RapidOCR package). Downloaded generation/embedding models are additional | Initial 4.5 GB installed-footprint target, unverified until packaging spike |
 
 ### Accessibility
 
@@ -303,7 +303,7 @@ graph TB
             DB[(SQLite)]
         end
         subgraph "Sidecar"
-            PY["Python Binary<br/>(pyannote, OpenCV, Tesseract)"]
+            PY["Python Binary<br/>(pyannote, OpenCV, RapidOCR)"]
         end
         subgraph "Llama Engine (Local)"
             LLM["llama-server<br/>(Summarization & RAG)"]
@@ -471,7 +471,7 @@ One stable release channel. Develop the complete feature set on macOS, then port
 | **M1: Skeleton** | Tauri + React shell, SQLite schema, Python sidecar scaffolding, monorepo CI |
 | **M2: Recording** | macOS ScreenCaptureKit, separate audio tracks (mic + system), ffmpeg encoding |
 | **M3: Transcription** | whisper-rs integration, pyannote VAD, VAD-guided chunking (5-min max), GPU backend detection, model manager (standard + quantized variants) |
-| **M4: Diarization + Slides** | pyannote source-aware diarization (multi-speaker mic by default, explicit personal-mic option), OpenCV headless slides, Tesseract OCR |
+| **M4: Diarization + Slides** | pyannote source-aware diarization (multi-speaker mic by default, explicit personal-mic option), OpenCV headless slides, RapidOCR |
 | **M5: Summarization** | Managed llama-server, optional selected Ollama/cloud providers, context budgeting, versioned summaries/action items, citations, automatic titles |
 | **M6: Meeting Detail** | Video playback, transcript sync, summary view, slides gallery |
 | **M7: Knowledge Base** | GGUF embeddings via llama-server, durable independent indexing, ChromaDB, PDF/MD/TXT ingestion, cited scoped chat, thread persistence, document linking and deletion |

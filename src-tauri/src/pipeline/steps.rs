@@ -758,7 +758,7 @@ mod tests {
     fn missing_add_ons_are_explained_without_technical_detail() {
         for step in ["diarization", "slides", "ocr"] {
             let message = unavailable_message(step);
-            for jargon in ["remote error", "-32001", "pip", "pytesseract", "pyannote", "sherpa", "Python"] {
+            for jargon in ["remote error", "-32001", "pip", "rapidocr", "pyannote", "sherpa", "Python"] {
                 assert!(!message.contains(jargon), "{jargon} in {message}");
             }
             assert!(message.ends_with("on this computer."), "{message}");
@@ -825,10 +825,10 @@ mod tests {
         assert!(sidecar_capability_missing(&SidecarError::NotRunning));
         assert!(sidecar_capability_missing(&SidecarError::Process("spawn failed".into())));
         assert!(sidecar_capability_missing(&SidecarError::Protocol(
-            ProtocolError::Remote(-32001, "OCR needs pytesseract".into())
+            ProtocolError::Remote(-32001, "text recognition is not installed".into())
         )));
         assert!(sidecar_capability_missing(&SidecarError::Protocol(
-            ProtocolError::Remote(-32000, "pytesseract and Pillow are required for OCR".into())
+            ProtocolError::Remote(-32000, "rapidocr is required for OCR".into())
         )));
         assert!(!sidecar_capability_missing(&SidecarError::Protocol(
             ProtocolError::Remote(-32000, "unable to open video: x.mp4".into())

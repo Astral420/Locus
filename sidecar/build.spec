@@ -1,12 +1,12 @@
 """PyInstaller recipe; model and native assets are copied only from local paths.
 
 Everything the default features need ends up inside the bundle, so the packaged app needs no
-Python, no Tesseract and no PyTorch on the user's machine:
+Python and no PyTorch on the user's machine:
   * RapidOCR (slide text) - its models are package data and are collected with it,
   * sherpa-onnx + onnxruntime (speaker detection) - native libraries are collected,
   * models/diarization/*.onnx (fetched by scripts/fetch-diarization-models.sh) -> <bundle>/models/diarization,
     which sidecar/src/resources.py searches.
-Optional alternatives (Tesseract via LOCUS_TESSERACT, a pyannote model) are still bundled when provided.
+An optional pyannote model is still bundled when provided.
 """
 import os
 from pathlib import Path
@@ -30,13 +30,6 @@ for package in ("rapidocr_onnxruntime", "sherpa_onnx", "onnxruntime", "chromadb"
         binaries += collect_dynamic_libs(package)
     except Exception:
         pass  # the package is not installed in this build environment
-
-binary_path = os.environ.get("LOCUS_TESSERACT")
-if binary_path and Path(binary_path).exists():
-    binaries.append((binary_path, "."))
-tessdata = os.environ.get("TESSDATA_PREFIX")
-if tessdata and Path(tessdata).exists():
-    datas.append((tessdata, "tessdata"))
 
 a = Analysis(
     [str(ROOT / "src" / "main.py")],

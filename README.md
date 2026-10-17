@@ -36,11 +36,11 @@ What is used, and why:
 | --- | --- | --- |
 | Slide text | RapidOCR (pip; models are inside the wheel) | `scripts/setup-sidecar.sh` |
 | Speaker labels | sherpa-onnx + pyannote segmentation 3.0 + a speaker-embedding model (ONNX, no PyTorch) | `scripts/fetch-diarization-models.sh` -> `models/diarization/` |
-| Optional alternatives | Tesseract (`LOCUS_TESSERACT`), pyannote.audio (`LOCUS_PYANNOTE_MODEL`) | `sidecar/requirements-optional.txt` |
+| Optional alternative | pyannote.audio (`LOCUS_PYANNOTE_MODEL`) | `sidecar/requirements-optional.txt` |
 
 Model files are found through `LOCUS_MODEL_DIRS` (set by the app: your app-data `models/` folder, then
 the bundled one), then the repository `models/` folder. The packaged sidecar (`sidecar/build.spec`) bundles
-these engines and models, so an installed Locus needs no Python, Tesseract or PyTorch on the user's machine.
+these engines and models, so an installed Locus needs no Python or PyTorch on the user's machine.
 Before shipping, check the licence of the speaker-embedding model that `fetch-diarization-models.sh` downloads.
 
 Native ScreenCaptureKit, Windows Graphics Capture, and PipeWire adapters are explicit platform seams and
