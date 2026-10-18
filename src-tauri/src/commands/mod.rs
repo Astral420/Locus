@@ -1,5 +1,6 @@
 pub mod knowledge;
 pub mod meetings;
+pub mod model_downloads;
 pub mod models;
 pub mod recording;
 pub mod storage;

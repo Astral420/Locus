@@ -14,6 +14,8 @@ interface UiState {
   resolvedTheme: "light" | "dark";
   sidebarCollapsed: boolean;
   downloadStatus: DownloadProgress;
+  /** Running model downloads by catalog id, so several can be listed at once. */
+  activeDownloads: Record<string, { name: string; progress: number }>;
   activeRecoveryModal: boolean;
   
   // Actions
@@ -27,6 +29,7 @@ interface UiState {
   modelsInstalledOnly: boolean;
   setModelsInstalledOnly: (installedOnly: boolean) => void;
   setDownloadStatus: (status: Partial<DownloadProgress>) => void;
+  setActiveDownload: (id: string, entry: { name: string; progress: number } | null) => void;
   setActiveRecoveryModal: (open: boolean) => void;
 }
 
@@ -78,6 +81,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     progress: 0,
     etaSeconds: 0,
   },
+  activeDownloads: {},
   activeRecoveryModal: false,
 
   setTheme: (newTheme) => {
@@ -122,6 +126,14 @@ export const useUiStore = create<UiState>((set, get) => ({
     set((state) => ({
       downloadStatus: { ...state.downloadStatus, ...status },
     })),
+
+  setActiveDownload: (id, entry) =>
+    set((state) => {
+      const next = { ...state.activeDownloads };
+      if (entry) next[id] = entry;
+      else delete next[id];
+      return { activeDownloads: next };
+    }),
 
   setActiveRecoveryModal: (open) => set({ activeRecoveryModal: open }),
 }));

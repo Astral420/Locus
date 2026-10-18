@@ -35,12 +35,14 @@ interface ActiveDownload {
 export const DownloadsButton: React.FC = () => {
   const [open, setOpen] = useState(false);
   const downloadStatus = useUiStore((s) => s.downloadStatus);
+  const activeDownloads = useUiStore((s) => s.activeDownloads);
   const { data: models = [] } = useQuery<ModelAssetDTO[]>({ queryKey: ["models"], queryFn: listModels });
 
   const downloads: ActiveDownload[] = [
     ...models
       .filter((m) => m.status === "downloading")
       .map((m) => ({ id: m.id, name: m.name, progress: m.download_progress ?? 0 })),
+    ...Object.entries(activeDownloads).map(([id, d]) => ({ id: `download:${id}`, name: d.name, progress: d.progress })),
     ...(downloadStatus.active
       ? [{ id: "ui-store", name: downloadStatus.modelName, progress: downloadStatus.progress }]
       : []),

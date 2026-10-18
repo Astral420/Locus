@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Header } from "../components/layout/Header";
 import { Button } from "../components/ui/Button";
@@ -8,7 +8,15 @@ import { ProgressBar } from "../components/ui/ProgressBar";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { Toggle } from "../components/ui/Toggle";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
-import { listModels, selectModel, type ModelAssetDTO } from "../lib/tauri";
+import {
+  cancelModelDownload,
+  downloadModel,
+  listModels,
+  onModelDownloadProgress,
+  refreshModelCatalog,
+  selectModel,
+  type ModelAssetDTO,
+} from "../lib/tauri";
 import { useUiStore } from "../stores/uiStore";
 import { Download, CheckCircle, ChevronDown, Info, Layers, X } from "lucide-react";
 
@@ -27,11 +35,33 @@ const STATUS_LABEL: Record<ModelAssetDTO["status"], string> = {
 export const isInstalled = (model: ModelAssetDTO): boolean =>
   model.status === "bundled" || model.status === "installed" || model.status === "active";
 
+/** Live state of one download, keyed by catalog id. */
+export interface DownloadState {
+  variantId: string;
+  state: "running" | "failed" | "canceled";
+  received: number;
+  total: number;
+  error?: string;
+}
+
+const percent = (d: DownloadState): number => (d.total > 0 ? Math.min(100, (d.received / d.total) * 100) : 0);
+
 /** One Hub-style model card. Catalog fields (author, downloads, variants, tags, fits) render only when present. */
-const ModelCard: React.FC<{ model: ModelAssetDTO; onSelect: (id: string) => void }> = ({ model, onSelect }) => {
+const ModelCard: React.FC<{
+  model: ModelAssetDTO;
+  onSelect: (id: string) => void;
+  download?: DownloadState;
+  onDownload: (catalogId: string, variantId?: string) => void;
+  onCancel: (catalogId: string) => void;
+}> = ({ model, onSelect, download, onDownload, onCancel }) => {
   const [showVariants, setShowVariants] = useState(false);
   const variants = model.variants ?? [];
+  const catalogId = model.catalog_id;
+  const downloading = download?.state === "running";
+  const canDownload = model.status === "available" && !!catalogId && variants.length > 0 && !downloading;
   const canSelect = model.status !== "available" && model.status !== "bundled";
+  // The variant behind the button on the card is the one the card summarises (e.g. Q4_K_M).
+  const headline = variants.find((v) => v.quantization === model.quantization?.toUpperCase()) ?? variants[0];
 
   return (
     <article className="rounded-xl bg-surface p-4 space-y-3" aria-label={model.name}>
@@ -64,6 +94,21 @@ const ModelCard: React.FC<{ model: ModelAssetDTO; onSelect: (id: string) => void
             <span className="inline-flex items-center gap-1.5 h-8 px-3.5 rounded-full bg-green-tint text-green-text text-xs font-medium">
               <CheckCircle className="w-3.5 h-3.5" /> Active
             </span>
+          ) : downloading && download ? (
+            <div className="w-44 space-y-1">
+              <ProgressBar value={percent(download)} label={`Downloading ${model.name}`} />
+              <div className="flex items-center justify-between gap-2 text-[11px] text-ink-muted nums-tabular">
+                <button
+                  type="button"
+                  onClick={() => catalogId && onCancel(catalogId)}
+                  className="inline-flex items-center gap-1 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
+                  aria-label={`Cancel download of ${model.name}`}
+                >
+                  <X className="w-3 h-3" aria-hidden="true" /> Cancel
+                </button>
+                <span>{Math.round(percent(download))}%</span>
+              </div>
+            </div>
           ) : model.status === "downloading" ? (
             <div className="w-40 space-y-1">
               <ProgressBar value={model.download_progress ?? 0} label={`Downloading ${model.name}`} />
@@ -71,14 +116,23 @@ const ModelCard: React.FC<{ model: ModelAssetDTO; onSelect: (id: string) => void
             </div>
           ) : (
             <Button
-              variant={canSelect ? "primary" : "secondary"}
+              variant={canSelect || canDownload ? "primary" : "secondary"}
               size="sm"
-              disabled={!canSelect}
-              onClick={() => canSelect && onSelect(model.id)}
+              disabled={!canSelect && !canDownload}
+              title={model.status === "available" && !canDownload ? "Not downloadable until the model catalog has loaded" : undefined}
+              onClick={() => {
+                if (canDownload && catalogId) onDownload(catalogId, headline?.id);
+                else if (canSelect) onSelect(model.id);
+              }}
             >
               <Download className="w-3.5 h-3.5" />
-              {model.status === "available" ? "Provision in Settings" : "Set Active"}
+              {model.status === "available" ? (download?.state === "failed" ? "Retry download" : "Download") : "Set Active"}
             </Button>
+          )}
+          {download?.state === "failed" && (
+            <p role="alert" className="max-w-[260px] text-right text-[11px] text-red-text">
+              Download failed: {download.error}
+            </p>
           )}
         </div>
       </div>
@@ -128,7 +182,7 @@ const ModelCard: React.FC<{ model: ModelAssetDTO; onSelect: (id: string) => void
       {showVariants && (
         <ul className="divide-y divide-border-subtle rounded-xl bg-bg px-3" aria-label={`${model.name} variants`}>
           {variants.map((v) => (
-            <li key={v.quantization} className="flex items-center justify-between gap-3 py-2.5 text-xs">
+            <li key={v.id ?? v.quantization} className="flex items-center justify-between gap-3 py-2.5 text-xs">
               <span className="font-mono text-ink">{v.quantization}</span>
               <span className="text-ink-muted nums-tabular">
                 {v.disk_size}
@@ -137,9 +191,10 @@ const ModelCard: React.FC<{ model: ModelAssetDTO; onSelect: (id: string) => void
               <Button
                 variant="secondary"
                 size="sm"
-                disabled
-                title="In-app downloads are not available yet"
+                disabled={!catalogId || !v.id || downloading || model.status !== "available"}
+                title={!catalogId ? "Not downloadable until the model catalog has loaded" : undefined}
                 aria-label={`Download ${v.quantization}`}
+                onClick={() => catalogId && onDownload(catalogId, v.id)}
               >
                 Download · {v.quantization}
               </Button>
@@ -159,6 +214,69 @@ export const ModelsContent: React.FC = () => {
     queryKey: ["models"],
     queryFn: listModels,
   });
+  // Pull a newer catalog in the background; the list above keeps working from the cached copy.
+  useEffect(() => {
+    let cancelled = false;
+    refreshModelCatalog()
+      .then((report) => {
+        if (!cancelled && report.updated.length > 0) {
+          void queryClient.invalidateQueries({ queryKey: ["models"] });
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [queryClient]);
+
+  // Downloads in flight, keyed by catalog id. Events also cover downloads the app starts itself
+  // (first-run provisioning), so a card shows progress whichever way the download began.
+  const [downloads, setDownloads] = useState<Record<string, DownloadState>>({});
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void onModelDownloadProgress((event) => {
+      setDownloads((current) => {
+        const next = { ...current };
+        if (event.state === "done") {
+          delete next[event.catalog_id];
+        } else {
+          next[event.catalog_id] = {
+            variantId: event.variant_id,
+            state: event.state,
+            received: event.received,
+            total: event.total,
+            error: event.error,
+          };
+        }
+        return next;
+      });
+      if (event.state === "done") void queryClient.invalidateQueries({ queryKey: ["models"] });
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [queryClient]);
+  const startDownload = useCallback(
+    (catalogId: string, variantId?: string) => {
+      setDownloads((c) => ({ ...c, [catalogId]: { variantId: variantId ?? "", state: "running", received: 0, total: 0 } }));
+      downloadModel(catalogId, variantId).catch((error: unknown) => {
+        // The backend also emits a "failed" event; this covers a request that never started.
+        setDownloads((c) =>
+          c[catalogId]?.state === "failed"
+            ? c
+            : { ...c, [catalogId]: { variantId: variantId ?? "", state: "failed", received: 0, total: 0, error: String(error) } },
+        );
+      });
+    },
+    [],
+  );
+  const cancelDownload = useCallback((catalogId: string) => void cancelModelDownload(catalogId), []);
+
   const noticeDismissed = useUiStore((s) => s.coreEngineNoticeDismissed);
   const dismissNotice = useUiStore((s) => s.dismissCoreEngineNotice);
   const installedOnly = useUiStore((s) => s.modelsInstalledOnly);
@@ -243,6 +361,9 @@ export const ModelsContent: React.FC = () => {
           <ModelCard
             key={model.id}
             model={model}
+            download={model.catalog_id ? downloads[model.catalog_id] : undefined}
+            onDownload={startDownload}
+            onCancel={cancelDownload}
             onSelect={(id) =>
               void selectModel(id, activeTab).then(() => queryClient.invalidateQueries({ queryKey: ["models"] }))
             }

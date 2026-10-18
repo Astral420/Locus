@@ -1,0 +1,82 @@
+[
+  {
+    "model_name": "gemma-3-4b-it-GGUF",
+    "developer": "unsloth",
+    "downloads": 1234,
+    "createdAt": "2025-03-12T10:00:00.000Z",
+    "pipeline_tag": "image-text-to-text",
+    "tools": false,
+    "num_quants": 2,
+    "quants": [
+      {
+        "model_id": "gemma-3-4b-it-Q4_K_M",
+        "path": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/0123456789abcdef0123456789abcdef01234567/gemma-3-4b-it-Q4_K_M.gguf",
+        "file_size": "2.3 GB",
+        "size_bytes": 2489894016,
+        "sha256": "a9f9ee6506a4efafff17a8ff0af6a88c64285a6b8fdb6be25498899c15e96d79"
+      },
+      {
+        "model_id": "gemma-3-4b-it-Q8_0",
+        "path": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/0123456789abcdef0123456789abcdef01234567/gemma-3-4b-it-Q8_0.gguf",
+        "file_size": "3.8 GB",
+        "size_bytes": 4130000000,
+        "sha256": "b75428ecd303adf9cb6bd9f7c2dd304c477704ff07b78e22e9a7097f1fdfd446"
+      }
+    ],
+    "num_mmproj": 1,
+    "mmproj_models": [
+      {
+        "model_id": "mmproj-F16",
+        "path": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/0123456789abcdef0123456789abcdef01234567/mmproj-F16.gguf",
+        "file_size": "811.8 MB",
+        "size_bytes": 851251104,
+        "sha256": "d8219ba087173a83612ae7a480b15545c2adeae0253519d7d256ecdb76dbf614"
+      }
+    ],
+    "readme": null,
+    "description": "",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  {
+    "model_name": "Qwen3-4B-Instruct-2507-GGUF",
+    "developer": "unsloth",
+    "downloads": 1234,
+    "createdAt": "2025-03-12T10:00:00.000Z",
+    "pipeline_tag": "text-generation",
+    "tools": false,
+    "num_quants": 1,
+    "quants": [
+      {
+        "model_id": "Qwen3-4B-Instruct-2507-Q4_K_M",
+        "path": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/0123456789abcdef0123456789abcdef01234567/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "file_size": "2.3 GB",
+        "size_bytes": 2497281120,
+        "sha256": "07d0710a3a55acc1b7f6dd5dd5825ac1f888897ee0f76970fa39804762174c31"
+      }
+    ],
+    "num_mmproj": 0,
+    "mmproj_models": [],
+    "readme": null,
+    "description": "",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  {
+    "model_name": "old-GGUF",
+    "developer": "someone",
+    "downloads": 3,
+    "createdAt": "2024-01-01T00:00:00.000Z",
+    "tools": false,
+    "num_quants": 1,
+    "quants": [
+      {
+        "model_id": "old-Q4_K_M",
+        "path": "https://huggingface.co/someone/old/resolve/main/old-Q4_K_M.gguf",
+        "file_size": "1.2 GB"
+      }
+    ],
+    "num_mmproj": 0,
+    "mmproj_models": [],
+    "readme": null,
+    "description": "pre-sha256 entry"
+  }
+]

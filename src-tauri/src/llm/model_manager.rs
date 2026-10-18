@@ -370,6 +370,36 @@ impl EmbeddingModelManager {
                 });
             }
         }
+        self.record_asset(path, catalog_id, artifact_revision, dimension, origin, actual)
+    }
+
+    /// Record a file whose sha256 was already verified while it downloaded, without
+    /// reading it a second time.
+    pub fn register_verified(
+        &self,
+        path: PathBuf,
+        catalog_id: &str,
+        artifact_revision: &str,
+        dimension: usize,
+        verified_sha256: &str,
+    ) -> Result<EmbeddingModelAsset, GenerationModelError> {
+        if dimension == 0 {
+            return Err(GenerationModelError::Unavailable(
+                "embedding dimension must be positive".into(),
+            ));
+        }
+        self.record_asset(path, catalog_id, artifact_revision, dimension, "downloaded", verified_sha256.to_ascii_lowercase())
+    }
+
+    fn record_asset(
+        &self,
+        path: PathBuf,
+        catalog_id: &str,
+        artifact_revision: &str,
+        dimension: usize,
+        origin: &str,
+        actual: String,
+    ) -> Result<EmbeddingModelAsset, GenerationModelError> {
         let asset = EmbeddingModelAsset {
             id: format!("embedding:{catalog_id}:{artifact_revision}"),
             catalog_id: catalog_id.into(),
@@ -598,6 +628,29 @@ impl GenerationModelManager {
                 });
             }
         }
+        self.record_asset(path, catalog_id, artifact_revision, origin, actual)
+    }
+
+    /// Record a file whose sha256 was already verified while it downloaded, without
+    /// reading it a second time.
+    pub fn register_verified(
+        &self,
+        path: PathBuf,
+        catalog_id: &str,
+        artifact_revision: &str,
+        verified_sha256: &str,
+    ) -> Result<GenerationModelAsset, GenerationModelError> {
+        self.record_asset(path, catalog_id, artifact_revision, "downloaded", verified_sha256.to_ascii_lowercase())
+    }
+
+    fn record_asset(
+        &self,
+        path: PathBuf,
+        catalog_id: &str,
+        artifact_revision: &str,
+        origin: &str,
+        actual: String,
+    ) -> Result<GenerationModelAsset, GenerationModelError> {
         let asset = GenerationModelAsset {
             id: format!("generation:{catalog_id}:{artifact_revision}"),
             catalog_id: catalog_id.into(),
