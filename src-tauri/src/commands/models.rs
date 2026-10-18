@@ -40,7 +40,7 @@ pub fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelAssetDto>, Str
         .database
         .run(|connection| {
             let mut statement = connection
-                .prepare("SELECT id, catalog_id, role, state, artifact_revision FROM model_assets")
+                .prepare("SELECT id, catalog_id, role, state, artifact_revision, relative_path FROM model_assets")
                 .map_err(|e| e.to_string())?;
             let rows = statement
                 .query_map([], |row| {
@@ -50,6 +50,7 @@ pub fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelAssetDto>, Str
                         role: row.get(2)?,
                         state: row.get(3)?,
                         artifact_revision: row.get(4)?,
+                        relative_path: row.get(5)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -89,6 +90,7 @@ pub fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelAssetDto>, Str
         active_whisper_file: active_whisper_file.as_deref(),
         active_generation: active_generation.as_deref(),
         active_embedding: active_embedding.as_deref(),
+        managed: model_state::ManagedFolders::for_paths(&state.paths),
     };
     Ok(build_model_list(&snapshot, &local))
 }
@@ -224,9 +226,7 @@ fn model_status(local: &LocalModels, model: &CatalogModel, states: &[VariantStat
             } else {
                 "embedding"
             };
-            let ready = local.assets.iter().any(|asset| {
-                asset.catalog_id == model.catalog_id && asset.role == db_role && asset.state == "ready"
-            });
+            let ready = model_state::installed_ready(local, &model.catalog_id, db_role);
             if !ready {
                 return "available";
             }
@@ -268,6 +268,7 @@ fn variant_dto(variant: &CatalogVariant, state: &VariantState) -> ModelVariantDt
         installed: state.installed,
         active: state.active,
         select_id: state.select_id.clone(),
+        removable: state.removable,
     }
 }
 
@@ -375,9 +376,7 @@ fn placeholder_row(
         ModelRole::Whisper => None,
     }
     .map(|value| value.trim_matches('"'));
-    let ready = local.assets.iter().any(|asset| {
-        asset.catalog_id == catalog_id && asset.role == db_role && asset.state == "ready"
-    });
+    let ready = model_state::installed_ready(local, catalog_id, db_role);
     let status = if selection == Some(catalog_id) {
         "active"
     } else if ready {
@@ -446,6 +445,24 @@ pub(crate) fn store_selection(
     database.run(move |connection| {
         connection.execute("INSERT INTO settings(key,value_json,updated_at) VALUES (?1,?2,datetime('now')) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", (&key, &value)).map(|_| ()).map_err(|e| e.to_string())
     }).map_err(|e| e.to_string())
+}
+
+/// Remove a role's selection so the resolver falls back to whatever remains.
+/// The sibling of `store_selection`, used by uninstall when nothing is left.
+pub(crate) fn clear_selection(database: &Database, role: &str) -> Result<(), String> {
+    let key = match role {
+        "llm" => "llm.generation_selection",
+        "embedding" => "llm.embedding_selection",
+        _ => "transcription.whisper_selection",
+    };
+    database
+        .run(move |connection| {
+            connection
+                .execute("DELETE FROM settings WHERE key=?1", [key])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -549,6 +566,7 @@ mod tests {
             role: role.into(),
             state: state.into(),
             artifact_revision: revision.into(),
+            relative_path: format!("{id}.gguf"),
         }
     }
 
@@ -559,6 +577,7 @@ mod tests {
             active_whisper_file: None,
             active_generation: None,
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         }
     }
 
@@ -641,6 +660,7 @@ mod tests {
             active_whisper_file: None,
             active_generation: None,
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         let some = build_model_list(&snapshot, &local);
         let whisper = by_role(&some, "whisper");
@@ -720,6 +740,7 @@ mod tests {
             active_whisper_file: None,
             active_generation: Some("\"generation:a/two:q4_k_m-1\""),
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         let list = build_model_list(&snapshot, &local);
         let state = |id: &str| list.iter().find(|m| m.id == id).unwrap().status.clone();
@@ -811,6 +832,7 @@ mod tests {
             active_whisper_file: Some("ggml-small.bin"),
             active_generation: Some("\"generation:a/one:q4_k_m-1\""),
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         for row in build_model_list(&full, &with_disk) {
             assert_ne!(row.status, "bundled");
@@ -838,6 +860,7 @@ mod tests {
             active_whisper_file: Some("ggml-small.bin"),
             active_generation: None,
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         let list = build_model_list(
             &CatalogSnapshot {
@@ -898,6 +921,7 @@ mod tests {
             active_whisper_file: None,
             active_generation: None,
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         assert_eq!(headline(&installed), Some("Q8_0".into()));
 
@@ -924,6 +948,7 @@ mod tests {
             active_whisper_file: None,
             active_generation: Some("\"generation:a/one:q8_0-1\""),
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         assert_eq!(headline(&active), Some("Q8_0".into()));
     }
@@ -958,6 +983,7 @@ mod tests {
             active_whisper_file: None,
             active_generation: Some("\"generation:a/one:q4_k_m-1\""),
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         let list = build_model_list(
             &CatalogSnapshot {
@@ -981,6 +1007,7 @@ mod tests {
             active_whisper_file: Some("ggml-small.bin"),
             active_generation: None,
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         let list = build_model_list(&CatalogSnapshot::default(), &local);
         let whisper = by_role(&list, "whisper");
@@ -1018,6 +1045,7 @@ mod tests {
             active_whisper_file: None,
             active_generation: Some("\"generation:a/one:q4_k_m-1\""),
             active_embedding: None,
+            managed: model_state::ManagedFolders::default(),
         };
         let list = build_model_list(
             &CatalogSnapshot {

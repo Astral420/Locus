@@ -20,12 +20,20 @@ import { Info, X } from "lucide-react";
 
 type ModelTab = "whisper" | "llm" | "embedding";
 
+/** One-line reminder of what each category's model actually does. */
+const TAB_PURPOSE: Record<ModelTab, string> = {
+  whisper: "Turns recordings into transcripts.",
+  llm: "Writes meeting summaries and answers questions in chat.",
+  embedding: "Powers knowledge search.",
+};
+
 /** On this machine already (downloaded/imported, or currently selected). */
 export const isInstalled = (model: ModelAssetDTO): boolean =>
   model.status === "installed" || model.status === "active";
 
 export const ModelsContent: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ModelTab>("whisper");
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const { data: models, isLoading } = useQuery<ModelAssetDTO[]>({
@@ -95,6 +103,16 @@ export const ModelsContent: React.FC = () => {
   );
   const cancelDownload = useCallback((catalogId: string) => void cancelModelDownload(catalogId), []);
 
+  // A removal that takes the last installed variant of a role changes what the app can still do,
+  // so the card's dialog spells that out. Counts are across every model, not just this card's.
+  const handleModelChanged = useCallback(
+    (message: string) => {
+      setStatusMessage(message);
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+    [queryClient],
+  );
+
   const noticeDismissed = useUiStore((s) => s.coreEngineNoticeDismissed);
   const dismissNotice = useUiStore((s) => s.dismissCoreEngineNotice);
   const installedOnly = useUiStore((s) => s.modelsInstalledOnly);
@@ -114,11 +132,19 @@ export const ModelsContent: React.FC = () => {
   const installedCount = inTab.filter(isInstalled).length;
   const filteredModels = installedOnly ? inTab.filter(isInstalled) : inTab;
 
+  const installedVariants = (role: ModelTab) =>
+    (models || [])
+      .filter((m) => m.role === role)
+      .flatMap((m) => m.variants ?? [])
+      .filter((v) => v.installed === true).length;
+  const whisperVariantsInstalled = installedVariants("whisper");
+  const llmVariantsInstalled = installedVariants("llm");
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <Header
         title="Model Manager"
-        subtitle="Offline weights for Whisper transcription, LLM summarization, and RAG embeddings"
+        subtitle="Offline models that power transcription, meeting summaries and chat, and knowledge search"
       />
 
       <div className="px-6 pt-2 pb-8 max-w-[742px] mx-auto w-full space-y-2 flex-1 overflow-y-auto">
@@ -153,7 +179,7 @@ export const ModelsContent: React.FC = () => {
             onChange={setActiveTab}
             options={[
               { value: "whisper", label: "Whisper Transcription" },
-              { value: "llm", label: "Summarization (llama-server)" },
+              { value: "llm", label: "Local Language Model" },
               { value: "embedding", label: "Embedding (RAG)" },
             ]}
           />
@@ -168,9 +194,19 @@ export const ModelsContent: React.FC = () => {
           </label>
         </div>
 
+        <p data-testid="tab-purpose" className="px-0.5 text-[13px] text-ink-muted">
+          {TAB_PURPOSE[activeTab]}
+        </p>
+
+        {statusMessage && (
+          <p role="status" className="rounded-xl bg-surface px-3 py-2 text-[13px] text-ink-muted">
+            {statusMessage}
+          </p>
+        )}
+
         {installedOnly && filteredModels.length === 0 && (
           <div role="status" className="rounded-xl bg-surface px-4 py-6 text-center text-[13px] text-ink-muted">
-            No {activeTab === "whisper" ? "Whisper" : activeTab === "llm" ? "summarization" : "embedding"} models are installed yet.
+            No {activeTab === "whisper" ? "Whisper" : activeTab === "llm" ? "language" : "embedding"} models are installed yet.
             Turn off “Installed only” to browse what is available.
           </div>
         )}
@@ -182,6 +218,9 @@ export const ModelsContent: React.FC = () => {
             download={model.catalog_id ? downloads[model.catalog_id] : undefined}
             onDownload={startDownload}
             onCancel={cancelDownload}
+            onChanged={handleModelChanged}
+            whisperVariantsInstalled={whisperVariantsInstalled}
+            llmVariantsInstalled={llmVariantsInstalled}
             onSelect={(id) =>
               void selectModel(id, activeTab).then(() => queryClient.invalidateQueries({ queryKey: ["models"] }))
             }

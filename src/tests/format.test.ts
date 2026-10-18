@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatElapsed, dbfsToPercent, formatDbfs } from "../lib/format";
+import { formatElapsed, dbfsToPercent, formatDbfs, formatBytes } from "../lib/format";
 
 describe("formatElapsed", () => {
   it("never renders fractional seconds (regression: 00:9.00096642...)", () => {
@@ -33,5 +33,14 @@ describe("dBFS meter helpers", () => {
     expect(formatDbfs(-90)).toBe("-inf dBFS");
     expect(formatDbfs(-12.4)).toBe("-12 dBFS");
     expect(formatDbfs(null)).toBe("-inf dBFS");
+  });
+});
+
+describe("formatBytes", () => {
+  it("uses whole MB below a gigabyte and one decimal above it", () => {
+    expect(formatBytes(0)).toBe("0 MB");
+    expect(formatBytes(999_999)).toBe("1 MB");
+    expect(formatBytes(1_000_000)).toBe("1 MB");
+    expect(formatBytes(2_489_894_016)).toBe("2.5 GB");
   });
 });

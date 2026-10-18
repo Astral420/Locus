@@ -105,6 +105,16 @@ export interface ModelVariantDTO {
   active?: boolean;
   /** Selection id to write when activating this variant; absent until installed. */
   select_id?: string;
+  /** Whether Locus owns the installed file and may delete it. */
+  removable?: boolean;
+}
+
+export interface UninstallResultDTO {
+  /** Variant ids that were removed. */
+  removed: string[];
+  freed_bytes: number;
+  /** The selection written after removal, when the active variant had to change. */
+  new_selection?: string | null;
 }
 
 export interface ModelDownloadEvent {
@@ -975,6 +985,12 @@ export async function onModelDownloadProgress(handler: (event: ModelDownloadEven
 
 export function selectModel(modelId: string, role: ModelAssetDTO["role"]): Promise<void> {
   return safeInvoke("select_model", { modelId, role }, () => undefined);
+}
+
+/** Removes one quantization, or every removable variant when `variantId` is omitted. Resolves with what was freed. */
+export function uninstallModel(catalogId: string, variantId?: string): Promise<UninstallResultDTO> {
+  // No fallback: a refused or failed removal must reject so the UI can explain why.
+  return safeInvoke<UninstallResultDTO>("uninstall_model", { catalogId, variantId: variantId ?? null });
 }
 
 export function getGpuBackend(): Promise<GpuBackendDTO> {

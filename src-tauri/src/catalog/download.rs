@@ -211,6 +211,11 @@ impl DownloadRegistry {
         Some(flag)
     }
 
+    /// Whether a download is currently running under `key`.
+    pub fn is_running(&self, key: &str) -> bool {
+        self.0.lock().unwrap().contains_key(key)
+    }
+
     /// Ask a running download to stop. False if nothing was running under `key`.
     pub fn cancel(&self, key: &str) -> bool {
         match self.0.lock().unwrap().get(key) {

@@ -24,3 +24,10 @@ export function formatDbfs(dbfs: number | null | undefined): string {
   if (dbfs == null || !Number.isFinite(dbfs) || dbfs <= DBFS_SILENCE) return "-inf dBFS";
   return `${Math.round(dbfs)} dBFS`;
 }
+
+/** Decimal model sizes, matching the Rust `format_bytes` rule: >= 1 GB is one decimal, otherwise whole MB. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "0 MB";
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  return `${(bytes / 1_000_000).toFixed(0)} MB`;
+}

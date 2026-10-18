@@ -187,6 +187,7 @@ pub fn run() {
             commands::models::refresh_model_catalog,
             commands::model_downloads::download_model,
             commands::model_downloads::cancel_model_download,
+            commands::model_uninstall::uninstall_model,
             commands::models::select_model,
             commands::models::get_gpu_backend,
             commands::storage::get_storage_info,

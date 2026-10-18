@@ -45,7 +45,7 @@ const llm = (over: Partial<ModelAssetDTO> = {}): ModelAssetDTO => ({
 
 const openLlmTab = async () => {
   renderApp("/models");
-  fireEvent.click(await screen.findByRole("button", { name: "Summarization (llama-server)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Local Language Model" }));
 };
 
 beforeEach(() => {
