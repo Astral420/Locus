@@ -58,7 +58,7 @@ describe("Tweak: Model Manager", () => {
   it("has no Import Local GGUF button and no inference-backend indicator", async () => {
     renderApp("/models");
     await h1("Model Manager");
-    await screen.findByText("Whisper Small (Bundled)");
+    await screen.findByText("Whisper Small");
     expect(screen.queryByText(/Import Local GGUF/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /import/i })).toBeNull();
     expect(screen.queryByText(/Inference backend/i)).toBeNull();

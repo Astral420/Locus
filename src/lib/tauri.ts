@@ -76,7 +76,7 @@ export interface ModelAssetDTO {
   memory_ram: string;
   memory_vram: string;
   disk_size: string;
-  status: "bundled" | "installed" | "active" | "downloading" | "available" | "error";
+  status: "installed" | "active" | "downloading" | "available" | "error";
   download_progress?: number;
   // Optional catalog fields (e.g. from a GitHub-hosted models.json). The Model Manager renders each only when present.
   author?: string;
@@ -86,13 +86,35 @@ export interface ModelAssetDTO {
   /** Whether the model fits this machine's memory, when the catalog or hardware probe knows. */
   fits?: boolean;
   variants?: ModelVariantDTO[];
+  /** Catalog id used to download; absent for the built-in placeholder rows. */
+  catalog_id?: string;
+  /** True for the default whisper and embedding models; renders a neutral "Default" tag. */
+  is_default?: boolean;
 }
 
 export interface ModelVariantDTO {
+  /** Catalog variant id, e.g. "q4_k_m" or "standard". */
+  id?: string;
   quantization: string;
   disk_size: string;
   memory_ram?: string;
   url?: string;
+  /** Whether this exact quantization is present on disk. */
+  installed?: boolean;
+  /** Whether this exact quantization is the selected one. */
+  active?: boolean;
+  /** Selection id to write when activating this variant; absent until installed. */
+  select_id?: string;
+}
+
+export interface ModelDownloadEvent {
+  catalog_id: string;
+  display_name: string;
+  variant_id: string;
+  state: "running" | "done" | "failed" | "canceled";
+  received: number;
+  total: number;
+  error?: string;
 }
 
 export interface StorageInfoDTO {
@@ -627,14 +649,21 @@ let mockPipelineStatusStore = [...MOCK_PIPELINE_STATUS];
 
 const MOCK_MODELS: ModelAssetDTO[] = [
   {
-    id: "whisper-small",
-    name: "Whisper Small (Bundled)",
+    id: "whisper:small:standard",
+    name: "Whisper Small",
     role: "whisper",
     parameter_size: "244M",
+    quantization: "Full precision",
     memory_ram: "1.0 GB",
     memory_vram: "1.0 GB",
     disk_size: "466 MiB",
     status: "active",
+    catalog_id: "whisper-small",
+    is_default: true,
+    variants: [
+      { id: "standard", quantization: "Full precision", disk_size: "466 MiB", memory_ram: "1.0 GB", installed: true, active: true, select_id: "whisper:small:standard" },
+      { id: "q5_1", quantization: "Q5_1", disk_size: "190 MiB", memory_ram: "600 MB", installed: false, active: false },
+    ],
   },
   {
     id: "whisper-medium",
@@ -909,6 +938,39 @@ export async function getSlides(meetingId: string): Promise<SlideDTO[]> {
 
 export function listModels(): Promise<ModelAssetDTO[]> {
   return safeInvoke("list_models", undefined, () => MOCK_MODELS);
+}
+
+export interface CatalogRefreshDTO {
+  updated: string[];
+  unchanged: string[];
+  /** "file: reason". A failed file keeps its previously cached copy. */
+  failed: string[];
+}
+
+/** Fetch newer model catalog files in the background. Never throws: the cached catalog stays in use. */
+export function refreshModelCatalog(): Promise<CatalogRefreshDTO> {
+  return safeInvoke("refresh_model_catalog", undefined, () => ({ updated: [], unchanged: [], failed: [] }));
+}
+
+/** Resolves when the download has finished (verified and registered) or rejects with the reason. */
+export function downloadModel(catalogId: string, variantId?: string): Promise<void> {
+  // No fallback: a failed download must reject so the UI can show why.
+  return safeInvoke<void>("download_model", { catalogId, variantId: variantId ?? null });
+}
+
+/** Stops a running download; the partial file is kept so it can resume. */
+export function cancelModelDownload(catalogId: string): Promise<boolean> {
+  return safeInvoke("cancel_model_download", { catalogId }, () => false);
+}
+
+/** Progress for downloads started by the user or by first-run provisioning. Returns an unsubscribe function. */
+export async function onModelDownloadProgress(handler: (event: ModelDownloadEvent) => void): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<ModelDownloadEvent>("model-download-progress", (e) => handler(e.payload));
+  } catch {
+    return () => undefined; // not running inside Tauri (browser dev / tests)
+  }
 }
 
 export function selectModel(modelId: string, role: ModelAssetDTO["role"]): Promise<void> {

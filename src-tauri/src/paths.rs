@@ -251,9 +251,61 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Finds a Whisper model file. Order: explicit environment override, the
-/// user's selection (`whisper:<size>:<origin>`), the small model, then any
-/// `ggml-*.bin`. Returns the path and the directory kind it was found in.
+fn bin_file_name(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|name| name.to_str())
+}
+
+fn is_whisper_bin(path: &Path) -> bool {
+    path.is_file()
+        && bin_file_name(path).is_some_and(|name| name.starts_with("ggml-") && name.ends_with(".bin"))
+}
+
+/// A `q\d_\d` quantization token (e.g. `q5_1`), the only suffix a strict family
+/// file may carry. Anything else (`-turbo`, `-encoder`, `.en`, longer numbers)
+/// is a different file, not a variant of this family.
+fn is_quant_variant(token: &str) -> bool {
+    let mut chars = token.chars();
+    matches!(chars.next(), Some('q'))
+        && matches!(chars.next(), Some(c) if c.is_ascii_digit())
+        && matches!(chars.next(), Some('_'))
+        && matches!(chars.next(), Some(c) if c.is_ascii_digit())
+        && chars.next().is_none()
+}
+
+/// Strict family grammar: exactly `ggml-{selector}.bin` or
+/// `ggml-{selector}-q\d_\d.bin`. `ggml-small.en.bin` and
+/// `ggml-large-v3-turbo.bin` are other models, never matches for `small` / `large-v3`.
+fn is_family_file(name: &str, selector: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix("ggml-")
+        .and_then(|rest| rest.strip_suffix(".bin"))
+    else {
+        return false;
+    };
+    if rest == selector {
+        return true;
+    }
+    rest.strip_prefix(selector)
+        .and_then(|tail| tail.strip_prefix('-'))
+        .is_some_and(is_quant_variant)
+}
+
+/// Preferred file of one strict family: the standard file first, then the
+/// quantizations in the order they were found (search dir, then name).
+fn pick_family(candidates: &[(usize, PathBuf)], selector: &str) -> Option<PathBuf> {
+    let standard = format!("ggml-{selector}.bin");
+    let mut matches: Vec<&(usize, PathBuf)> = candidates
+        .iter()
+        .filter(|(_, path)| bin_file_name(path).is_some_and(|name| is_family_file(name, selector)))
+        .collect();
+    matches.sort_by_key(|(_, path)| bin_file_name(path) != Some(standard.as_str()));
+    matches.first().map(|(_, path)| path.clone())
+}
+
+/// Finds a Whisper model file. Order: explicit environment override, the exact
+/// file named by the user's selection (`whisper:<selector>:<variant>`) when the
+/// variant segment is `standard` or a `q\d_\d` quantization, the selected family
+/// (strict grammar), the small model, then any `ggml-*.bin`.
 pub fn find_whisper_model(
     paths: &AppPaths,
     selection: Option<&str>,
@@ -262,48 +314,50 @@ pub fn find_whisper_model(
     if let Some(path) = env_override.filter(|path| path.is_file()) {
         return Some(path);
     }
-    let wanted_size = selection
-        .and_then(|id| id.trim_matches('"').split(':').nth(1))
-        .filter(|size| !size.is_empty())
-        .map(str::to_owned);
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for dir in paths.whisper_search_dirs() {
+    let parts: Vec<&str> = selection
+        .map(|id| id.trim_matches('"').split(':').collect())
+        .unwrap_or_default();
+    let selector = parts.get(1).copied().filter(|value| !value.is_empty());
+    let variant = parts.get(2).copied();
+
+    let mut candidates: Vec<(usize, PathBuf)> = Vec::new();
+    for (index, dir) in paths.whisper_search_dirs().into_iter().enumerate() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         let mut found: Vec<PathBuf> = entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file()
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("ggml-") && name.ends_with(".bin"))
-            })
+            .filter(|path| is_whisper_bin(path))
             .collect();
         found.sort();
-        candidates.extend(found);
+        candidates.extend(found.into_iter().map(|path| (index, path)));
     }
-    let rank = |path: &PathBuf| -> u8 {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if let Some(size) = &wanted_size {
-            if name.starts_with(&format!("ggml-{size}")) {
-                return 0;
+
+    if let (Some(selector), Some(variant)) = (selector, variant) {
+        if variant == "standard" || is_quant_variant(variant) {
+            let exact = if variant == "standard" {
+                format!("ggml-{selector}.bin")
+            } else {
+                format!("ggml-{selector}-{variant}.bin")
+            };
+            if let Some((_, path)) = candidates
+                .iter()
+                .find(|(_, path)| bin_file_name(path) == Some(exact.as_str()))
+            {
+                return Some(path.clone());
             }
         }
-        if name.starts_with("ggml-small") {
-            1
-        } else {
-            2
+    }
+    if let Some(selector) = selector {
+        if let Some(path) = pick_family(&candidates, selector) {
+            return Some(path);
         }
-    };
-    candidates.sort_by_key(|path| rank(path));
-    candidates.into_iter().next()
+    }
+    if let Some(path) = pick_family(&candidates, "small") {
+        return Some(path);
+    }
+    candidates.into_iter().map(|(_, path)| path).next()
 }
 
 #[cfg(test)]
@@ -424,6 +478,80 @@ mod tests {
         assert_eq!(
             find_whisper_model(&paths, None, Some(explicit.clone())),
             Some(explicit)
+        );
+    }
+
+    fn whisper_fixture(files: &[&str]) -> (tempfile::TempDir, AppPaths) {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::for_root(root.path());
+        paths.create_directories().unwrap();
+        for file in files {
+            fs::write(paths.whisper_models().join(file), b"m").unwrap();
+        }
+        (root, paths)
+    }
+
+    fn resolved_name(path: Option<PathBuf>) -> String {
+        path.unwrap().file_name().unwrap().to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn whisper_selection_with_a_variant_picks_the_exact_file() {
+        let (_root, paths) = whisper_fixture(&["ggml-small.bin", "ggml-small-q5_1.bin"]);
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:small:q5_1\""), None)),
+            "ggml-small-q5_1.bin"
+        );
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:small:standard\""), None)),
+            "ggml-small.bin"
+        );
+    }
+
+    #[test]
+    fn whisper_family_selection_never_leaks_english_or_turbo_files() {
+        let (_root, paths) = whisper_fixture(&[
+            "ggml-small.bin",
+            "ggml-small.en.bin",
+            "ggml-large-v3.bin",
+            "ggml-large-v3-turbo.bin",
+        ]);
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:small:x\""), None)),
+            "ggml-small.bin"
+        );
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:large-v3:x\""), None)),
+            "ggml-large-v3.bin"
+        );
+    }
+
+    #[test]
+    fn whisper_family_selection_prefers_the_standard_file() {
+        let (_root, paths) =
+            whisper_fixture(&["ggml-small-q5_1.bin", "ggml-small-q5_0.bin", "ggml-small.bin"]);
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:small:catalog\""), None)),
+            "ggml-small.bin"
+        );
+    }
+
+    #[test]
+    fn legacy_selection_ids_still_resolve() {
+        let (_root, paths) = whisper_fixture(&["ggml-tiny.bin", "ggml-small-q5_1.bin"]);
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:small:bundled\""), None)),
+            "ggml-small-q5_1.bin"
+        );
+        // A variant the family does not offer falls back to the family itself.
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:small:q5_0\""), None)),
+            "ggml-small-q5_1.bin"
+        );
+        // An unknown selector falls back to the old defaults (small, then any).
+        assert_eq!(
+            resolved_name(find_whisper_model(&paths, Some("\"whisper:medium:standard\""), None)),
+            "ggml-small-q5_1.bin"
         );
     }
 }

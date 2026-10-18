@@ -179,7 +179,7 @@ describe("Model Manager: Installed only switch", () => {
     parameter_size: "1B", memory_ram: "1 GB", memory_vram: "1 GB", disk_size: "1 GB",
   });
   const catalog = [
-    model("w-bundled", "Whisper Small", "whisper", "bundled"),
+    model("w-small", "Whisper Small", "whisper", "installed"),
     model("w-base", "Whisper Base", "whisper", "available"),
     model("w-med", "Whisper Medium", "whisper", "installed"),
     model("w-large", "Whisper Large", "whisper", "downloading"),
@@ -202,7 +202,7 @@ describe("Model Manager: Installed only switch", () => {
     }
   });
 
-  it("when on, shows only models already on this machine (bundled, installed, active)", async () => {
+  it("when on, shows only models already on this machine (installed, active)", async () => {
     renderApp("/models");
     await screen.findByText("Whisper Small");
     fireEvent.click(switchEl());
@@ -250,10 +250,10 @@ describe("Integration: Model Manager (Hub-style cards + catalog fields)", () => 
   it("shows catalog fields only where the data has them", async () => {
     renderApp("/models");
     await h1("Model Manager");
-    // Whisper tab: no catalog data, so no author / variants UI is invented.
-    expect(await screen.findByText("Whisper Small (Bundled)")).toBeTruthy();
+    // Whisper tab: the mock has variants but no author, so only the variant UI appears.
+    expect(await screen.findByText("Whisper Small")).toBeTruthy();
     expect(screen.queryByText(/^By /)).toBeNull();
-    expect(screen.queryByText("Show variants")).toBeNull();
+    expect(screen.getAllByText("Show variants").length).toBe(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Summarization (llama-server)" }));
     expect(await screen.findByText("By Meta")).toBeTruthy();
@@ -279,13 +279,13 @@ describe("Integration: Model Manager (Hub-style cards + catalog fields)", () => 
     expect(download.disabled).toBe(true);
   });
 
-  it("Set Active selects the model and refreshes the list; the active model has no action button", async () => {
+  it("Set active selects the model and refreshes the list; the active model has no action button", async () => {
     const models = await actualTauri.listModels();
     const installed = { ...models.find((m) => m.id === "whisper-medium")!, status: "installed" as const };
     vi.mocked(tauri.listModels).mockResolvedValue([installed]);
 
     renderApp("/models");
-    const setActive = await screen.findByRole("button", { name: "Set Active" });
+    const setActive = await screen.findByRole("button", { name: "Set active" });
     const callsBefore = vi.mocked(tauri.listModels).mock.calls.length;
     fireEvent.click(setActive);
 

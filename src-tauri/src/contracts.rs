@@ -83,7 +83,7 @@ pub struct SlideDto {
     pub repeated_timestamps: Option<Vec<f64>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModelAssetDto {
     pub id: String,
     pub name: String,
@@ -95,6 +95,59 @@ pub struct ModelAssetDto {
     pub disk_size: String,
     pub status: String,
     pub download_progress: Option<f32>,
+    // Catalog fields; the Model Manager renders each only when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fits: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<ModelVariantDto>,
+    /// Catalog id used to download this model; absent for built-in placeholder rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
+    /// The app's own first-run pick (Whisper Small / the small embedder), not a status.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_default: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelVariantDto {
+    /// Catalog variant id ("q4_k_m", "standard"), passed back to `download_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub quantization: String,
+    pub disk_size: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ram: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Whether this exact variant is on disk.
+    #[serde(default)]
+    pub installed: bool,
+    /// Whether this exact variant is the one the pipeline resolves.
+    #[serde(default)]
+    pub active: bool,
+    /// Selection value to pass back to `select_model`; present only when installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CatalogRefreshDto {
+    pub updated: Vec<String>,
+    pub unchanged: Vec<String>,
+    /// "file: reason". A failed file keeps its previously cached copy.
+    pub failed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

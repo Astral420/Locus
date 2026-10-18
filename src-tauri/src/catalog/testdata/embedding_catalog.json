@@ -1,0 +1,35 @@
+[
+  {
+    "model_name": "all-MiniLM-L6-v2-GGUF",
+    "developer": "leliuga",
+    "downloads": 1234,
+    "createdAt": "2025-03-12T10:00:00.000Z",
+    "pipeline_tag": "feature-extraction",
+    "num_quants": 2,
+    "quants": [
+      {
+        "model_id": "all-MiniLM-L6-v2.Q8_0",
+        "path": "https://huggingface.co/leliuga/all-MiniLM-L6-v2-GGUF/resolve/0123456789abcdef0123456789abcdef01234567/all-MiniLM-L6-v2.Q8_0.gguf",
+        "file_size": "22.9 MB",
+        "size_bytes": 24000000,
+        "sha256": "3d57467662bd93237caef862e25a30b5e30f1129b293cc8de1734869d4ba901f"
+      },
+      {
+        "model_id": "all-MiniLM-L6-v2.F16",
+        "path": "https://huggingface.co/leliuga/all-MiniLM-L6-v2-GGUF/resolve/0123456789abcdef0123456789abcdef01234567/all-MiniLM-L6-v2.F16.gguf",
+        "file_size": "42.9 MB",
+        "size_bytes": 45000000,
+        "sha256": "17b05e136440bb06dc5f1468eb5f76fcf2f7c51ec3692d3b0d8e19c5ac60ebf6"
+      }
+    ],
+    "readme": null,
+    "description": "Very small English sentence embedder (384 dimensions); input beyond 256 tokens is truncated.",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "embedding": {
+      "dimension": 384,
+      "max_sequence_tokens": 256,
+      "query_prefix": "",
+      "document_prefix": ""
+    }
+  }
+]

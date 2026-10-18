@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod catalog;
 pub mod commands;
 pub mod contracts;
 pub mod db;
@@ -34,6 +35,8 @@ pub struct AppState {
     pub summarization: llm::summarization::SummarizationService,
     pub knowledge: knowledge::KnowledgeService,
     pub sidecar: Arc<Mutex<SidecarManager>>,
+    pub catalog: catalog::CatalogService,
+    pub downloads: catalog::download::DownloadRegistry,
     pub embedding_models: EmbeddingModelManager,
     pub generation_models: GenerationModelManager,
     pub storage: storage::StorageService,
@@ -94,6 +97,7 @@ fn build_state(app: &tauri::AppHandle) -> Result<AppState, Box<dyn std::error::E
         paths.models.clone(),
     );
     let _ = storage.recover_incomplete();
+    let catalog = catalog::CatalogService::new(paths.data_dir.join("catalog"));
     Ok(AppState {
         capture: CaptureManager::with_audio(Some(database.clone())),
         media_root: paths.media.clone(),
@@ -106,6 +110,8 @@ fn build_state(app: &tauri::AppHandle) -> Result<AppState, Box<dyn std::error::E
             paths.documents.clone(),
         ),
         sidecar,
+        catalog,
+        downloads: Default::default(),
         embedding_models,
         generation_models,
         storage,
@@ -127,6 +133,7 @@ pub fn run() {
             state.capture.start_watchdog();
             app.manage(state);
             app.state::<AppState>().executor.start(app.handle().clone());
+            commands::model_downloads::spawn_first_run_provisioning(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -177,6 +184,9 @@ pub fn run() {
             commands::meetings::retry_pipeline_step,
             commands::meetings::get_slides,
             commands::models::list_models,
+            commands::models::refresh_model_catalog,
+            commands::model_downloads::download_model,
+            commands::model_downloads::cancel_model_download,
             commands::models::select_model,
             commands::models::get_gpu_backend,
             commands::storage::get_storage_info,

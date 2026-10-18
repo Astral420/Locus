@@ -7,12 +7,12 @@ import { useRecordingStore } from "../../stores/recordingStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useWindowResync } from "../../lib/useWindowResync";
 import { useInputModality } from "../../lib/useInputModality";
-import { showRecordingWindow, isTauriEnvironment } from "../../lib/tauri";
+import { showRecordingWindow, isTauriEnvironment, onModelDownloadProgress } from "../../lib/tauri";
 
 export const AppShell: React.FC = () => {
   const navigate = useNavigate();
   const { recoverable, state: recordingState, tick, syncFromBackend } = useRecordingStore();
-  const { activeRecoveryModal, setActiveRecoveryModal } = useUiStore();
+  const { activeRecoveryModal, setActiveRecoveryModal, setActiveDownload } = useUiStore();
   const [backgroundNotice, setBackgroundNotice] = useState(false);
 
   // Resynchronize on window focus/visibility
@@ -28,6 +28,28 @@ export const AppShell: React.FC = () => {
       .catch(() => undefined);
     return () => unlisten?.();
   }, []);
+
+  // Model downloads (started by the user or by first-run setup) feed the sidebar's Downloads
+  // popover from any page, one entry per download so several stack instead of replacing each other.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void onModelDownloadProgress((event) => {
+      if (event.state === "running") {
+        const progress = event.total > 0 ? Math.min(100, (event.received / event.total) * 100) : 0;
+        setActiveDownload(event.catalog_id, { name: event.display_name, progress });
+      } else {
+        setActiveDownload(event.catalog_id, null);
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [setActiveDownload]);
 
   // Live recording HUD: in the desktop app the Rust capture engine is the single
   // source of truth for elapsed time and dBFS levels, so poll it. Outside Tauri
