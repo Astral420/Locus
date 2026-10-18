@@ -76,7 +76,7 @@ export interface ModelAssetDTO {
   memory_ram: string;
   memory_vram: string;
   disk_size: string;
-  status: "bundled" | "installed" | "active" | "downloading" | "available" | "error";
+  status: "installed" | "active" | "downloading" | "available" | "error";
   download_progress?: number;
   // Optional catalog fields (e.g. from a GitHub-hosted models.json). The Model Manager renders each only when present.
   author?: string;
@@ -88,6 +88,8 @@ export interface ModelAssetDTO {
   variants?: ModelVariantDTO[];
   /** Catalog id used to download; absent for the built-in placeholder rows. */
   catalog_id?: string;
+  /** True for the default whisper and embedding models; renders a neutral "Default" tag. */
+  is_default?: boolean;
 }
 
 export interface ModelVariantDTO {
@@ -97,6 +99,12 @@ export interface ModelVariantDTO {
   disk_size: string;
   memory_ram?: string;
   url?: string;
+  /** Whether this exact quantization is present on disk. */
+  installed?: boolean;
+  /** Whether this exact quantization is the selected one. */
+  active?: boolean;
+  /** Selection id to write when activating this variant; absent until installed. */
+  select_id?: string;
 }
 
 export interface ModelDownloadEvent {
@@ -641,14 +649,21 @@ let mockPipelineStatusStore = [...MOCK_PIPELINE_STATUS];
 
 const MOCK_MODELS: ModelAssetDTO[] = [
   {
-    id: "whisper-small",
-    name: "Whisper Small (Bundled)",
+    id: "whisper:small:standard",
+    name: "Whisper Small",
     role: "whisper",
     parameter_size: "244M",
+    quantization: "Full precision",
     memory_ram: "1.0 GB",
     memory_vram: "1.0 GB",
     disk_size: "466 MiB",
     status: "active",
+    catalog_id: "whisper-small",
+    is_default: true,
+    variants: [
+      { id: "standard", quantization: "Full precision", disk_size: "466 MiB", memory_ram: "1.0 GB", installed: true, active: true, select_id: "whisper:small:standard" },
+      { id: "q5_1", quantization: "Q5_1", disk_size: "190 MiB", memory_ram: "600 MB", installed: false, active: false },
+    ],
   },
   {
     id: "whisper-medium",

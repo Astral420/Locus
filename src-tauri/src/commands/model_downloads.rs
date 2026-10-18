@@ -7,6 +7,8 @@ use crate::{
         model::{CatalogModel, CatalogVariant, ModelRole},
         CatalogSnapshot,
     },
+    commands::models::{store_selection, whisper_selector},
+    db::Database,
     paths::AppPaths,
     AppState,
 };
@@ -49,8 +51,6 @@ pub struct Installed {
     pub path: PathBuf,
     /// The `model_assets` id; whisper files are found on disk and have none.
     pub asset_id: Option<String>,
-    /// Kept so a first-run download can also select the model it just installed.
-    pub embedding: Option<crate::llm::model_manager::EmbeddingModelAsset>,
 }
 
 fn commit_prefix(url: &str) -> String {
@@ -103,19 +103,19 @@ pub(crate) fn install_with(
     // Unique per variant and upstream commit, because (catalog_id, revision) is unique in the database.
     let revision = format!("{}-{}", variant.id, commit_prefix(&variant.file.url));
     match model.role {
-        ModelRole::Whisper => Ok(Installed { path, asset_id: None, embedding: None }),
+        ModelRole::Whisper => Ok(Installed { path, asset_id: None }),
         ModelRole::Embedding => {
             let dimension = model.embedding.as_ref().map_or(0, |meta| meta.dimension);
             let asset = embedding
                 .register_verified(path.clone(), &model.catalog_id, &revision, dimension, &variant.file.sha256)
                 .map_err(|e| e.to_string())?;
-            Ok(Installed { path, asset_id: Some(asset.id.clone()), embedding: Some(asset) })
+            Ok(Installed { path, asset_id: Some(asset.id) })
         }
         ModelRole::Llm => {
             let asset = generation
                 .register_verified(path.clone(), &model.catalog_id, &revision, &variant.file.sha256)
                 .map_err(|e| e.to_string())?;
-            Ok(Installed { path, asset_id: Some(asset.id), embedding: None })
+            Ok(Installed { path, asset_id: Some(asset.id) })
         }
     }
 }
@@ -137,6 +137,77 @@ fn emit(app: &AppHandle, model: &CatalogModel, variant: &CatalogVariant, state: 
     );
 }
 
+fn had_asset(database: &Database, role: &'static str) -> bool {
+    database
+        .run(move |connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM model_assets WHERE role=?1 AND state='ready'",
+                    [role],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .map(|count| count > 0)
+        .unwrap_or(false)
+}
+
+/// Whether the role already had a usable model before this download. Only then is a
+/// download auto-activated; a later download never switches the active model (A1).
+fn had_model(state: &AppState, role: ModelRole) -> bool {
+    match role {
+        ModelRole::Whisper => {
+            let selection: Option<String> = state
+                .database
+                .run(|connection| {
+                    connection
+                        .query_row(
+                            "SELECT value_json FROM settings WHERE key='transcription.whisper_selection'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(|error| error.to_string())
+                })
+                .ok()
+                .flatten();
+            crate::paths::find_whisper_model(
+                &state.paths,
+                selection.as_deref(),
+                std::env::var_os(crate::paths::ENV_WHISPER_MODEL).map(PathBuf::from),
+            )
+            .is_some()
+        }
+        ModelRole::Embedding => had_asset(&state.database, "embedding"),
+        ModelRole::Llm => had_asset(&state.database, "generation"),
+    }
+}
+
+/// Write the freshly installed model as the active one, using the shared settings upsert.
+pub(crate) fn activate_role(
+    database: &Database,
+    model: &CatalogModel,
+    variant: &CatalogVariant,
+    installed: &Installed,
+) {
+    match model.role {
+        ModelRole::Whisper => {
+            let selection = format!("whisper:{}:{}", whisper_selector(&model.catalog_id), variant.id);
+            let _ = store_selection(database, "whisper", &selection);
+        }
+        ModelRole::Embedding => {
+            if let Some(asset_id) = &installed.asset_id {
+                let _ = store_selection(database, "embedding", asset_id);
+            }
+        }
+        ModelRole::Llm => {
+            if let Some(asset_id) = &installed.asset_id {
+                let _ = store_selection(database, "llm", asset_id);
+            }
+        }
+    }
+}
+
 /// Blocking: download, register, and report progress events. Shared by the command and
 /// the first-run provisioning.
 fn run_install(app: &AppHandle, model: &CatalogModel, variant: &CatalogVariant) -> Result<Installed, String> {
@@ -144,6 +215,7 @@ fn run_install(app: &AppHandle, model: &CatalogModel, variant: &CatalogVariant) 
     let Some(cancel) = state.downloads.begin(&model.catalog_id) else {
         return Err(format!("{} is already downloading", model.catalog_id));
     };
+    let had = had_model(&state, model.role);
     let total = variant.file.size_bytes;
     let mut last_emit = Instant::now() - Duration::from_secs(1);
     let result = install(&state.paths, &state, model, variant, &cancel, |progress| {
@@ -155,7 +227,13 @@ fn run_install(app: &AppHandle, model: &CatalogModel, variant: &CatalogVariant) 
     });
     state.downloads.finish(&model.catalog_id);
     match &result {
-        Ok(_) => emit(app, model, variant, "done", Progress { received: total, total }, None),
+        Ok(installed) => {
+            // Before the done event, so the UI refetch already sees the new selection.
+            if !had {
+                activate_role(&state.database, model, variant, installed);
+            }
+            emit(app, model, variant, "done", Progress { received: total, total }, None);
+        }
         Err(message) if message == &DownloadError::Canceled.to_string() => {
             emit(app, model, variant, "canceled", Progress { received: 0, total }, None)
         }
@@ -291,18 +369,9 @@ pub fn spawn_first_run_provisioning(app: AppHandle) {
         let plan = plan_provisioning(&state.catalog.snapshot(), whisper_present, embedding_present);
         let mut failed = false;
         for (model, variant) in &plan.downloads {
-            match run_install(&app, model, variant) {
-                Ok(installed) => {
-                    if let Some(asset) = &installed.embedding {
-                        if setting(&app, "llm.embedding_selection").is_none() {
-                            let _ = state.embedding_models.select(asset);
-                        }
-                    }
-                }
-                Err(error) => {
-                    failed = true;
-                    eprintln!("locus: first-run download of {} failed: {error}", model.catalog_id);
-                }
+            if let Err(error) = run_install(&app, model, variant) {
+                failed = true;
+                eprintln!("locus: first-run download of {} failed: {error}", model.catalog_id);
             }
         }
         if !failed && plan.unavailable.is_empty() {
@@ -483,5 +552,80 @@ mod tests {
             serde_json::to_string(&event).unwrap(),
             r#"{"catalog_id":"a","display_name":"A","variant_id":"b","state":"running","received":5,"total":10}"#
         );
+    }
+
+    /// The settings value without its JSON quoting, as `models.rs` reads it.
+    fn selected(database: &Database, key: &str) -> Option<String> {
+        let key = key.to_string();
+        database
+            .run(move |connection| {
+                connection
+                    .query_row("SELECT value_json FROM settings WHERE key=?1", [&key], |row| row.get::<_, String>(0))
+                    .optional()
+                    .map_err(|error| error.to_string())
+            })
+            .ok()
+            .flatten()
+            .map(|value| value.trim_matches('"').to_string())
+    }
+
+    #[test]
+    fn the_first_whisper_download_becomes_active_with_its_variant() {
+        let f = fixture();
+        let database = Database::in_memory().unwrap();
+        let m = model(ModelRole::Whisper, "whisper-small", vec![variant("standard", "ggml-small.bin", serve())]);
+        assert!(
+            crate::paths::find_whisper_model(&f.paths, None, None).is_none(),
+            "no whisper model is present before the download"
+        );
+        let installed = install_with(&f.paths, &f.embedding, &f.generation, &m, &m.variants[0], &AtomicBool::new(false), |_| {}).unwrap();
+        activate_role(&database, &m, &m.variants[0], &installed);
+        assert_eq!(
+            selected(&database, "transcription.whisper_selection").as_deref(),
+            Some("whisper:small:standard"),
+            "activation names the exact variant that was just installed"
+        );
+    }
+
+    #[test]
+    fn a_second_download_keeps_the_existing_selection() {
+        let f = fixture();
+        let database = Database::in_memory().unwrap();
+        let first = model(ModelRole::Whisper, "whisper-small", vec![variant("standard", "ggml-small.bin", serve())]);
+        let installed = install_with(&f.paths, &f.embedding, &f.generation, &first, &first.variants[0], &AtomicBool::new(false), |_| {}).unwrap();
+        activate_role(&database, &first, &first.variants[0], &installed);
+
+        let second = model(ModelRole::Whisper, "whisper-tiny", vec![variant("standard", "ggml-tiny.bin", serve())]);
+        let installed = install_with(&f.paths, &f.embedding, &f.generation, &second, &second.variants[0], &AtomicBool::new(false), |_| {}).unwrap();
+        let had = crate::paths::find_whisper_model(&f.paths, selected(&database, "transcription.whisper_selection").as_deref(), None).is_some();
+        assert!(had, "the first selection already resolves to a model on disk");
+        if !had {
+            activate_role(&database, &second, &second.variants[0], &installed);
+        }
+        assert_eq!(selected(&database, "transcription.whisper_selection").as_deref(), Some("whisper:small:standard"));
+    }
+
+    #[test]
+    fn first_embedding_and_llm_downloads_are_selected_by_asset_id() {
+        let f = fixture();
+        let database = Database::in_memory().unwrap();
+        assert!(!had_asset(&database, "embedding"));
+
+        let embedding = model(ModelRole::Embedding, "all-minilm-l6-v2", vec![variant("q8_0", "minilm.Q8_0.gguf", serve())]);
+        let installed = install_with(&f.paths, &f.embedding, &f.generation, &embedding, &embedding.variants[0], &AtomicBool::new(false), |_| {}).unwrap();
+        activate_role(&database, &embedding, &embedding.variants[0], &installed);
+        assert_eq!(selected(&database, "llm.embedding_selection").as_deref(), Some("embedding:all-minilm-l6-v2:q8_0-01234567"));
+
+        assert!(!had_asset(&database, "generation"));
+        let llm = model(ModelRole::Llm, "unsloth/gemma-3-4b-it", vec![variant("q4_k_m", "gemma-Q4_K_M.gguf", serve())]);
+        let installed = install_with(&f.paths, &f.embedding, &f.generation, &llm, &llm.variants[0], &AtomicBool::new(false), |_| {}).unwrap();
+        activate_role(&database, &llm, &llm.variants[0], &installed);
+        assert_eq!(selected(&database, "llm.generation_selection").as_deref(), Some("generation:unsloth/gemma-3-4b-it:q4_k_m-01234567"));
+    }
+
+    #[test]
+    fn default_constants_are_unchanged() {
+        assert_eq!(DEFAULT_WHISPER, ("whisper-small", "standard"));
+        assert_eq!(DEFAULT_EMBEDDING, ("all-minilm-l6-v2", "q8_0"));
     }
 }

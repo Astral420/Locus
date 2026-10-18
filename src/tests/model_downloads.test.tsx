@@ -123,7 +123,7 @@ describe("Model downloads", () => {
     vi.mocked(tauri.listModels).mockResolvedValue([llm({ status: "installed" })]);
     act(() => emit({ catalog_id: "unsloth/gemma-3-4b-it", display_name: "gemma-3-4b-it", variant_id: "q4_k_m", state: "done", received: 200, total: 200 }));
     await waitFor(() => expect(vi.mocked(tauri.listModels).mock.calls.length).toBeGreaterThan(before));
-    expect(await screen.findByRole("button", { name: "Set Active" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Set active" })).toBeTruthy();
   });
 
   it("feeds the sidebar Downloads popover, from any page, and empties it when the download ends", async () => {

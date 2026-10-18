@@ -11,3 +11,4 @@ Locus used to bundle `whisper-small` so that capture and transcription worked on
 - **A bad catalog never replaces a good one.** A fetched file replaces the cached copy only if it parses and still yields at least one verifiable model. The app reads the cache and never waits on the network.
 - **First-run downloads are idempotent.** Once the defaults are present the `models.first_run_provisioned` setting stops further automatic downloads, so a user who deletes a model is not surprised by a re-download. A failure leaves the flag unset and the next launch retries.
 - **Changing the embedding model changes the vectors.** Existing index generations are tied to the model id, revision and dimension, so switching models re-indexes rather than mixing vectors.
+- **Selection names a variant.** Which quantization is active is decided per model in [0006](0006-model-variant-selection.md).
