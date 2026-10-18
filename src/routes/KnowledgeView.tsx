@@ -296,7 +296,7 @@ export const KnowledgeContent: React.FC = () => {
               <span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Scope</span><select value={scope} onChange={(event) => changeScope(event.target.value as KnowledgeScope)} className="h-8 pl-3 pr-2 rounded-full border border-border bg-surface-hover text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent">{Object.entries(scopeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="flex items-center gap-2 text-xs">
               <span className="font-semibold text-ink-muted text-[11px] uppercase tracking-wider">Destination</span>
               <select aria-label="Chat provider destination" className="h-8 pl-3 pr-2 rounded-full border border-border bg-surface-hover text-xs text-ink">
-                <option>Local · llama-server</option>
+                <option>Local · Language Model</option>
                 <option>Ollama</option><option>OpenAI</option>
                 <option>Anthropic</option>
                 <option>Gemini</option>

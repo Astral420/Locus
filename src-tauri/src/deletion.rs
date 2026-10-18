@@ -58,6 +58,12 @@ pub fn tombstone_and_cleanup(
                 collect_optional_paths(&transaction, "SELECT relative_path FROM media_segments WHERE manifest_id IN (SELECT id FROM capture_manifests WHERE meeting_id=?1)", &meeting_id, &mut paths)?;
                 collect_optional_paths(&transaction, "SELECT relative_path FROM artifact_revisions WHERE meeting_id=?1", &meeting_id, &mut paths)?;
                 collect_optional_paths(&transaction, "SELECT relative_path FROM slides WHERE meeting_id=?1", &meeting_id, &mut paths)?;
+                // The meeting's media directory is the owned unit: recordings,
+                // raw streams, slides and intermediates that are not tracked
+                // row-by-row (audio.wav, system_audio.wav, sync-report.txt,
+                // audio-streams.json, ...) all live under it. Remove it last so
+                // its children are gone before the directory itself.
+                paths.push(meeting_id.clone());
                 let manifest = CleanupManifest { meeting_id: meeting_id.clone(), generation, paths: paths.clone() };
                 transaction
                     .execute(
@@ -192,6 +198,30 @@ pub fn retry_pending_cleanup(
             completed += 1;
         }
     }
+    // Reconcile tombstones whose cleanup manifest predates recording the whole
+    // meeting directory: the tombstone is the durable signal that the meeting's
+    // owned media must go, so any directory still on disk is removed. Already
+    // gone is a cheap no-op, keeping restarts idempotent.
+    let deleted = database
+        .run(|connection| {
+            let mut statement = connection
+                .prepare("SELECT id FROM meetings WHERE deleted_at IS NOT NULL")
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string());
+            rows
+        })
+        .map_err(|error| DeletionError::Database(error.to_string()))?;
+    for meeting_id in deleted {
+        let directory = owned_path(media_root.as_ref(), Path::new(&meeting_id))?;
+        if directory.exists() {
+            fs::remove_dir_all(&directory).map_err(|error| DeletionError::Io(error.to_string()))?;
+            completed += 1;
+        }
+    }
     Ok(completed)
 }
 
@@ -214,46 +244,88 @@ fn collect_optional_paths(
 }
 
 fn owned_path(root: &Path, path: &Path) -> Result<PathBuf, DeletionError> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| DeletionError::Io(error.to_string()))?;
     let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {
         root.join(path)
     };
-    let root = root
-        .canonicalize()
-        .map_err(|error| DeletionError::Io(error.to_string()))?;
-    let parent = resolved.parent().unwrap_or(&resolved);
-    let parent = parent
-        .canonicalize()
-        .map_err(|error| DeletionError::Io(error.to_string()))?;
-    if !parent.starts_with(&root) || resolved == root {
+    // Resolve symlinks when the target still exists; when an earlier attempt
+    // already removed it (or its parent), fall back to a lexical check so a
+    // retry reconciles the rest instead of failing forever.
+    let checked = match resolved.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => lexical_normalize(&resolved),
+    };
+    if checked == root || !checked.starts_with(&root) {
         return Err(DeletionError::UnsafePath(resolved));
     }
-    Ok(resolved)
+    Ok(checked)
+}
+
+/// Collapse `.` and `..` segments without touching the filesystem, so a path
+/// whose parents no longer exist can still be containment-checked.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn seed_meeting(db: &Database, meeting_id: &str) {
+        let meeting_id = meeting_id.to_owned();
+        db.run(move |connection| {
+            connection
+                .execute(
+                    "INSERT INTO meetings(id,title,title_origin,recorded_at,timezone) VALUES (?1,'Meeting','placeholder','now','+00:00')",
+                    [&meeting_id],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    }
+
     #[test]
-    fn tombstone_excludes_meeting_and_preserves_linked_document() {
+    fn tombstone_excludes_meeting_and_removes_all_owned_media() {
         let root = tempfile::tempdir().unwrap();
         let media = root.path().join("media");
-        fs::create_dir_all(&media).unwrap();
-        fs::create_dir_all(media.join("m1")).unwrap();
-        fs::write(media.join("m1/audio.mp4"), b"audio").unwrap();
+        fs::create_dir_all(media.join("m1/slides")).unwrap();
+        // The mixed recording is tracked; the raw streams and sidecars are not.
+        fs::write(media.join("m1/recording.mp4"), b"video").unwrap();
+        fs::write(media.join("m1/audio.wav"), b"audio").unwrap();
+        fs::write(media.join("m1/system_audio.wav"), b"sys").unwrap();
+        fs::write(media.join("m1/sync-report.txt"), b"sync").unwrap();
+        fs::write(media.join("m1/slides/slide-0000.png"), b"png").unwrap();
         let db = Database::in_memory().unwrap();
         db.run(|connection| {
             connection.execute("INSERT INTO meetings(id,title,title_origin,recorded_at,timezone) VALUES ('m1','Meeting','placeholder','now','+00:00')", []).map_err(|e| e.to_string())?;
             connection.execute("INSERT INTO documents(id,content_hash,relative_path,media_type,size_bytes,extraction_state,extraction_version) VALUES ('d1','hash','d1.md','text/markdown',3,'ready','1')", []).map_err(|e| e.to_string())?;
             connection.execute("INSERT INTO document_meetings(document_id,meeting_id) VALUES ('d1','m1')", []).map_err(|e| e.to_string())?;
             connection.execute("INSERT INTO capture_manifests(id,meeting_id,capture_generation,state,manifest_path) VALUES ('cm1','m1',0,'saved','m1/manifest.json')", []).map_err(|e| e.to_string())?;
-            connection.execute("INSERT INTO media_segments(id,manifest_id,stream_id,source,ordinal,relative_path,start_seconds,duration_seconds,committed_at) VALUES ('seg','cm1','mixed','mixed',0,'m1/audio.mp4',0,1,'now')", []).map_err(|e| e.to_string())?;
+            connection.execute("INSERT INTO media_segments(id,manifest_id,stream_id,source,ordinal,relative_path,start_seconds,duration_seconds,committed_at) VALUES ('seg','cm1','mixed','mixed',0,'m1/recording.mp4',0,1,'now')", []).map_err(|e| e.to_string())?;
+            connection.execute("INSERT INTO slides(id,meeting_id,image_hash,relative_path) VALUES ('s1','m1','hash','m1/slides/slide-0000.png')", []).map_err(|e| e.to_string())?;
             Ok(())
         }).unwrap();
         let report = tombstone_and_cleanup(&db, &media, "m1").unwrap();
-        assert_eq!(report.physical_paths_removed, 1);
+        assert!(report.physical_paths_removed >= 1);
+        assert!(
+            !media.join("m1").exists(),
+            "the whole media directory is removed"
+        );
         assert!(db
             .run(|connection| connection
                 .query_row(
@@ -272,5 +344,34 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn retry_reconciles_media_for_already_tombstoned_meetings() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("media");
+        fs::create_dir_all(media.join("m1")).unwrap();
+        fs::write(media.join("m1/audio.wav"), b"audio").unwrap();
+        let db = Database::in_memory().unwrap();
+        db.run(|connection| {
+            connection.execute("INSERT INTO meetings(id,title,title_origin,recorded_at,timezone,deleted_at,lifecycle) VALUES ('m1','Meeting','placeholder','now','+00:00','now','deleted')", []).map_err(|e| e.to_string())?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(retry_pending_cleanup(&db, &media).unwrap(), 1);
+        assert!(!media.join("m1").exists());
+        // A second pass is a no-op and does not error on the now-missing paths.
+        assert_eq!(retry_pending_cleanup(&db, &media).unwrap(), 0);
+    }
+
+    #[test]
+    fn tombstone_rejects_a_meeting_id_that_escapes_the_media_root() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("media");
+        fs::create_dir_all(&media).unwrap();
+        let db = Database::in_memory().unwrap();
+        seed_meeting(&db, "../escape");
+        let result = tombstone_and_cleanup(&db, &media, "../escape");
+        assert!(matches!(result, Err(DeletionError::UnsafePath(_))));
+        assert!(!root.path().join("escape").exists());
     }
 }

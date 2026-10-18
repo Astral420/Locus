@@ -228,9 +228,9 @@ describe("Model Manager: Installed only switch", () => {
     renderApp("/models");
     await screen.findByText("Whisper Small");
     fireEvent.click(switchEl());
-    fireEvent.click(screen.getByRole("button", { name: "Summarization (llama-server)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Local Language Model" }));
     expect(await screen.findByRole("status")).toBeTruthy();
-    expect(screen.getByText(/No summarization models are installed yet/)).toBeTruthy();
+    expect(screen.getByText(/No language models are installed yet/)).toBeTruthy();
     expect(screen.queryByText("Llama Available")).toBeNull();
     fireEvent.click(switchEl()); // off: the available model comes back and the message goes away
     expect(await screen.findByText("Llama Available")).toBeTruthy();
@@ -255,7 +255,7 @@ describe("Integration: Model Manager (Hub-style cards + catalog fields)", () => 
     expect(screen.queryByText(/^By /)).toBeNull();
     expect(screen.getAllByText("Show variants").length).toBe(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Summarization (llama-server)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Local Language Model" }));
     expect(await screen.findByText("By Meta")).toBeTruthy();
     expect(screen.getByText("By Mistral AI")).toBeTruthy();
     expect(screen.getByText("289,502")).toBeTruthy(); // download count, locale formatted
@@ -267,7 +267,7 @@ describe("Integration: Model Manager (Hub-style cards + catalog fields)", () => 
 
   it("expands variants, each with a disabled Download pill (no download backend yet)", async () => {
     renderApp("/models");
-    fireEvent.click(await screen.findByRole("button", { name: "Summarization (llama-server)" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Local Language Model" }));
     const toggles = await screen.findAllByRole("button", { name: /Show variants/ });
     expect(toggles[0].getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(toggles[0]);

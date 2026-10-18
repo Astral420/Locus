@@ -140,6 +140,20 @@ pub struct ModelVariantDto {
     /// Selection value to pass back to `select_model`; present only when installed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub select_id: Option<String>,
+    /// Whether Locus may delete this file: it lives inside the managed folder for
+    /// its role. Installed files found elsewhere (dev checkout, bundled, override)
+    /// are never removable. Always serialized.
+    #[serde(default)]
+    pub removable: bool,
+}
+
+/// Outcome of `uninstall_model`: which variant ids were removed, how many bytes
+/// that freed, and the selection value written as a fallback (if any).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UninstallResultDto {
+    pub removed: Vec<String>,
+    pub freed_bytes: u64,
+    pub new_selection: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

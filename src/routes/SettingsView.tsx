@@ -272,7 +272,7 @@ export const SettingsContent: React.FC = () => {
               {policyCard}
               <SettingsCard title="Llama.cpp">
                 <SettingsRow
-                  label="Local llama-server"
+                  label="Local Language Model"
                   description="Private loopback inference, zero data leaves machine"
                   control={selectButton("llama_server")}
                 />

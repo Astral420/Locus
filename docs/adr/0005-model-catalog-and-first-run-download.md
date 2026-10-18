@@ -12,3 +12,4 @@ Locus used to bundle `whisper-small` so that capture and transcription worked on
 - **First-run downloads are idempotent.** Once the defaults are present the `models.first_run_provisioned` setting stops further automatic downloads, so a user who deletes a model is not surprised by a re-download. A failure leaves the flag unset and the next launch retries.
 - **Changing the embedding model changes the vectors.** Existing index generations are tied to the model id, revision and dimension, so switching models re-indexes rather than mixing vectors.
 - **Selection names a variant.** Which quantization is active is decided per model in [0006](0006-model-variant-selection.md).
+- **Removing a model is safe.** Uninstalling deletes only Locus-owned files and never resets the first-run flag; see [0007](0007-model-uninstall.md).
