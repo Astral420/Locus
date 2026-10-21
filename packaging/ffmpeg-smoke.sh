@@ -31,6 +31,11 @@ dec="$("$ff" -hide_banner -decoders 2>/dev/null)"
 for d in h264 aac rawvideo pcm_s16le; do echo "$dec" | grep -qE " $d " || fail "$d decoder missing"; done
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+# MSYS2/Cygwin: the shell maps /tmp to an install-relative directory, but the
+# native Windows FFmpeg resolves POSIX paths against the current drive root
+# (D:/tmp), so the fixtures would be written where FFmpeg never looks.  Hand
+# both bash and FFmpeg the same native path (drive letter + forward slashes).
+if command -v cygpath >/dev/null 2>&1; then tmp="$(cygpath -m "$tmp")"; fi
 
 # --- fixtures, built without FFmpeg so the binary under test stays minimal ----
 # Mono 48 kHz 16-bit PCM WAV, the format capture/audio.rs writes (hound).
