@@ -28,6 +28,8 @@ models/diarization/
 .venv/
 packaging/llama-engine/.work/
 packaging/llama-engine/dist/
+src-tauri/llama-engine/*
+!src-tauri/llama-engine/README.md
 
 02-bundling-resolution.md
 03-backend-detection.md
