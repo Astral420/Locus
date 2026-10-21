@@ -4,6 +4,7 @@ use crate::{
         LlamaEmbeddingProvider, SearchResultDto, UploadDocumentResult,
     },
     llm::{
+        engine::resolve_llama_server,
         llama_cpp::{LlamaServerConfig, LlamaServerManager},
         model_manager::{EmbeddingModelCatalogEntry, EmbeddingModelManager},
         providers::build_provider,
@@ -297,9 +298,7 @@ pub fn select_embedding_model(
 }
 
 pub(crate) fn embedding_provider(state: &AppState) -> Result<LlamaEmbeddingProvider, String> {
-    let binary = std::env::var_os("LOCUS_LLAMA_SERVER_BIN")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("llama-server"));
+    let binary = resolve_llama_server().binary;
     embedding_provider_with(&state.embedding_models, &state.embedding_server, binary)
 }
 

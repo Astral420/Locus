@@ -63,6 +63,16 @@ jobs:
           security list-keychains -d user -s "$kc" login.keychain
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/ffmpeg/ffmpeg
 
+      # The patched engine exists for macOS x86_64 only. Build and sign it
+      # before bundling so notarization covers it, exactly like FFmpeg.
+      - name: Build and stage the bundled llama-server engine (macOS x86_64)
+        if: matrix.target == 'x86_64-apple-darwin'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          packaging/llama-engine/build.sh
+          packaging/llama-engine/stage.sh
+
       - name: Build installer
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
