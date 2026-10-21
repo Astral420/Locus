@@ -29,6 +29,12 @@ models/diarization/
 packaging/llama-engine/.work/
 packaging/llama-engine/dist/
 
+02-bundling-resolution.md
+03-backend-detection.md
+04-launch-contract.md
+05-qualification.md
+06-license-notices.md
+
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
