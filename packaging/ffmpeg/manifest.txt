@@ -1,7 +1,7 @@
 # target                       url                                                                                               sha256
 # Filled in after running the "build-ffmpeg" workflow (it prints these lines in its job summary).
 # fetch-ffmpeg.sh refuses to run while a hash is still TODO.
-aarch64-apple-darwin           https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-aarch64-apple-darwin.tar.gz    TODO
-x86_64-apple-darwin            https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-apple-darwin.tar.gz     TODO
-x86_64-pc-windows-msvc         https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-pc-windows-msvc.tar.gz  TODO
-x86_64-unknown-linux-gnu       https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-unknown-linux-gnu.tar.gz TODO
+aarch64-apple-darwin https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-aarch64-apple-darwin.tar.gz ae7397ac678daece35a6831f45c827bd1086a80cdb6ec9e8f289290c71cb1ba5
+x86_64-apple-darwin https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-apple-darwin.tar.gz fbac90165c6e73d131ee86ab9aa72c12a56ceda91a6085ed2db80379b9c01411
+x86_64-pc-windows-msvc https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-pc-windows-msvc.tar.gz 1123151db1577a841231a22d1d80758ca24f1d9f97e62f9fcf49595cb7cbc83e
+x86_64-unknown-linux-gnu https://github.com/Astral420/Locus/releases/download/ffmpeg-7.1.1-1/ffmpeg-x86_64-unknown-linux-gnu.tar.gz 020134e5d7cdf868112c49ecfe72de1e6cb8232e4e7b5a8e730d5440d43064ba
