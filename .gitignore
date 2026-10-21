@@ -26,6 +26,8 @@ src-tauri/media/
 
 models/diarization/
 .venv/
+packaging/llama-engine/.work/
+packaging/llama-engine/dist/
 
 *.sqlite
 *.sqlite-wal

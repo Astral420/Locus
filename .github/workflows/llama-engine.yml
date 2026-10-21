@@ -1,0 +1,32 @@
+name: llama-engine
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run: { shell: bash }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build patched llama-server (x86_64)
+        run: packaging/llama-engine/build.sh
+
+      - name: Install Rosetta
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Run engine tests (x86_64 via Rosetta)
+        run: packaging/llama-engine/test.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-engine-x86_64
+          path: packaging/llama-engine/dist/
+          if-no-files-found: error
