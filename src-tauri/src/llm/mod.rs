@@ -4,6 +4,7 @@
 //! in the OS keychain and are read by the provider clients at request time.
 
 pub mod anthropic;
+pub mod backend;
 pub mod engine;
 pub mod gemini;
 pub mod llama_cpp;

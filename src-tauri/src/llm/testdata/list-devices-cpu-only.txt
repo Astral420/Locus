@@ -1,0 +1,2 @@
+Available devices:
+  BLAS: Accelerate (0 MiB, 0 MiB free)
