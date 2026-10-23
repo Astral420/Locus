@@ -1,0 +1,3 @@
+Available devices:
+  MTL0: AMD Radeon RX 6600 (8176 MiB, 8175 MiB free)
+  BLAS: Accelerate (0 MiB, 0 MiB free)

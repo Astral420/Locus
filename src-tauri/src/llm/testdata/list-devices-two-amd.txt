@@ -1,0 +1,3 @@
+Available devices:
+  MTL0: AMD Radeon RX 570 (4096 MiB, 4096 MiB free)
+  MTL1: AMD Radeon RX 6600 (8176 MiB, 8176 MiB free)
