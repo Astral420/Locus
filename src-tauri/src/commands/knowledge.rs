@@ -4,6 +4,7 @@ use crate::{
         LlamaEmbeddingProvider, SearchResultDto, UploadDocumentResult,
     },
     llm::{
+        backend::{detect_llama_backend, LlamaBackend},
         engine::resolve_llama_server,
         llama_cpp::{LlamaServerConfig, LlamaServerManager},
         model_manager::{EmbeddingModelCatalogEntry, EmbeddingModelManager},
@@ -299,7 +300,14 @@ pub fn select_embedding_model(
 
 pub(crate) fn embedding_provider(state: &AppState) -> Result<LlamaEmbeddingProvider, String> {
     let binary = resolve_llama_server().binary;
-    embedding_provider_with(&state.embedding_models, &state.embedding_server, binary)
+    let choice = detect_llama_backend();
+    eprintln!("llama backend: {:?} ({})", choice.backend, choice.reason);
+    embedding_provider_with(
+        &state.embedding_models,
+        &state.embedding_server,
+        binary,
+        Some(choice.backend),
+    )
 }
 
 /// Whether the currently running embedding server may serve the wanted model.
@@ -328,6 +336,7 @@ pub(crate) fn embedding_provider_with(
     models: &EmbeddingModelManager,
     slot: &Mutex<Option<Arc<LlamaServerManager>>>,
     binary: PathBuf,
+    llama_backend: Option<LlamaBackend>,
 ) -> Result<LlamaEmbeddingProvider, String> {
     let asset = models.selected().map_err(|_| {
         "semantic search is unavailable: import or download an embedding model, then select it"
@@ -355,6 +364,7 @@ pub(crate) fn embedding_provider_with(
                 let mut config = LlamaServerConfig::new(binary);
                 config.model_path = Some(asset.path.clone());
                 config.embedding = true;
+                config.llama_backend = llama_backend.clone();
                 let new_server = Arc::new(
                     LlamaServerManager::launch(config)
                         .map_err(|error| format!("embedding engine is unavailable: {error}"))?,
@@ -612,7 +622,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         }
 
         fn provider(&self) -> Result<LlamaEmbeddingProvider, String> {
-            embedding_provider_with(&self.manager, &self.slot, self.binary.clone())
+            embedding_provider_with(&self.manager, &self.slot, self.binary.clone(), None)
         }
 
         fn launches(&self) -> usize {
@@ -736,7 +746,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         let _provider_a = fixture.provider().unwrap();
         fixture.select(&b);
         let missing = fixture.dir.path().join("does-not-exist-llama-server");
-        let error = match embedding_provider_with(&fixture.manager, &fixture.slot, missing) {
+        let error = match embedding_provider_with(&fixture.manager, &fixture.slot, missing, None) {
             Ok(_) => panic!("launching with a missing binary should fail"),
             Err(error) => error,
         };
