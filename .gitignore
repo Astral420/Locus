@@ -28,6 +28,7 @@ models/diarization/
 .venv/
 packaging/llama-engine/.work/
 packaging/llama-engine/dist/
+packaging/llama-engine/dist-source/
 src-tauri/llama-engine/*
 !src-tauri/llama-engine/README.md
 
