@@ -1,3 +1,7 @@
+> **Scope change:** llama.cpp on Intel Mac + AMD now uses the patched Metal engine
+> (see `LLAMA_METAL_AMD.md`).
+> This document remains for whisper only.
+
 # Intel Mac + AMD Vulkan/MoltenVK qualification
 
 M11 is a qualified-build path, not a promise that any Vulkan-enabled binary is safe to ship. The CPU transcription and local-generation paths remain the correctness baseline.
