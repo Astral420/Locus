@@ -23,6 +23,8 @@ jobs:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04,   platform: linux,   bundles: appimage }
           - { target: x86_64-pc-windows-msvc,   os: windows-2022,   platform: windows, bundles: nsis }
     runs-on: ${{ matrix.os }}
+    # contents: write is for attaching the engine source offer to the release.
+    permissions: { contents: write }
     defaults:
       run: { shell: bash }
     steps:
@@ -73,6 +75,24 @@ jobs:
           packaging/llama-engine/build.sh
           packaging/llama-engine/stage.sh
 
+      # GPL-3.0-or-later: the corresponding source has to be published with the
+      # binary, so the offer archive is built here and attached next to the
+      # installer (and carried in the artifact either way).
+      - name: Build the engine source offer (macOS x86_64)
+        if: matrix.target == 'x86_64-apple-darwin'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          packaging/llama-engine/source-offer.sh
+          tarball="$(ls packaging/llama-engine/dist-source/llama-engine-source-*.tar.gz)"
+          base="$(basename "$tarball")"
+          ( cd packaging/llama-engine/dist-source && shasum -a 256 "$base" > "$base.sha256" )
+          if [ "$GITHUB_REF_TYPE" = tag ] && gh release view "$GITHUB_REF_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$tarball" "$tarball.sha256" --repo "${{ github.repository }}" --clobber
+          else
+            echo "no release exists for this run; the source offer stays in the workflow artifact"
+          fi
+
       - name: Build installer
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -95,3 +115,5 @@ jobs:
             src-tauri/target/**/release/bundle/appimage/*.AppImage
             src-tauri/target/**/release/bundle/nsis/*-setup.exe
             src-tauri/ffmpeg/BUILDINFO.txt
+            packaging/llama-engine/dist-source/llama-engine-source-*.tar.gz
+            packaging/llama-engine/dist-source/llama-engine-source-*.tar.gz.sha256

@@ -10,7 +10,8 @@ Locus application code is MIT-licensed. The release process must replace each `u
 | whisper.cpp / whisper-rs | Transcription | exact commit and license required | unverified |
 | pyannote community model | VAD and diarization | exact model revision and model license required | unverified |
 | RapidOCR + PP-OCR models (ONNX) | OCR | RapidOCR is Apache-2.0 and its models come from PaddleOCR (Apache-2.0); exact package version, model files and notices required | unverified |
-| llama.cpp / llama-server | Local generation and embeddings | exact commit and license required | unverified |
+| llama.cpp / ggml | Local generation and embeddings, built into the patched engine below | MIT; commit `d81235049384534c167caea52b85a694f6103d14` of https://github.com/ggml-org/llama.cpp, pinned in `packaging/llama-engine/pin.env` | macOS x86_64, inside the patched engine |
+| ToshLLM llama.cpp patch series (bundled `llama-server`) | AMD Metal fixes applied to llama.cpp; shipped as a separate `llama-server` binary that Locus starts as its own process over loopback HTTP and links nothing from | GPL-3.0-or-later; ToshLLM `v0.87.26`, commit `523b814ac8cc61d80afbc73cece581c34234658b` (https://github.com/engeldlgado/toshllm), notices in `LICENSE` and `patches/COPYRIGHT`. Corresponding source: `llama-engine-source-v0.87.26.tar.gz`, built by `packaging/llama-engine/source-offer.sh` and attached to each release next to the installer; see [ADR 0008](../adr/0008-llama-engine-license.md) | macOS x86_64 |
 | MoltenVK | Intel Mac Vulkan translation | Apache-2.0; exact SDK version required | unverified |
 
 Do not publish an installer while an asset required for offline first launch lacks a verified provenance record.
