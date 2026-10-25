@@ -20,6 +20,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use std::sync::OnceLock;
+
 pub const VIDEO_FILE_NAME: &str = "recording.mp4";
 /// How long to wait for the first captured frame. First use on macOS can sit
 /// behind the Screen Recording permission prompt, so this is generous.
@@ -61,38 +64,214 @@ pub fn bundled_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 /// machines that happen to have Homebrew FFmpeg. Debug builds also probe
 /// common install locations and PATH for convenience.
 pub fn locate_ffmpeg() -> Option<PathBuf> {
-    if let Some(custom) = std::env::var_os("LOCUS_FFMPEG") {
-        let path = PathBuf::from(custom);
-        if path.is_file() {
-            return Some(path);
+    #[cfg(test)]
+    {
+        return locate_test_ffmpeg();
+    }
+    #[cfg(not(test))]
+    {
+        if let Some(custom) = std::env::var_os("LOCUS_FFMPEG") {
+            let path = PathBuf::from(custom);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        let mut candidates: Vec<PathBuf> = vec![];
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+        {
+            candidates.extend(bundled_candidates(&dir));
+        }
+        // Running from a source checkout (`tauri dev`): the resource folder.
+        candidates.push(PathBuf::from("ffmpeg").join(FFMPEG_NAME));
+        candidates.push(PathBuf::from("src-tauri/ffmpeg").join(FFMPEG_NAME));
+        #[cfg(debug_assertions)]
+        {
+            for fixed in [
+                "/opt/homebrew/bin/ffmpeg",
+                "/usr/local/bin/ffmpeg",
+                "/usr/bin/ffmpeg",
+            ] {
+                candidates.push(PathBuf::from(fixed));
+            }
+            if let Some(path_var) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&path_var) {
+                    candidates.push(dir.join(FFMPEG_NAME));
+                }
+            }
+        }
+        candidates.into_iter().find(|candidate| candidate.is_file())
+    }
+}
+
+/// Muxers/encoders/devices/filters the test helpers (`-f s16le`, `-f rawvideo`,
+/// `-f lavfi -i testsrc=...`) need. The shipped FFmpeg is deliberately minimal,
+/// so unit tests may need a different binary.
+#[cfg(test)]
+const REQUIRED_TEST_CAPABILITIES: [&str; 7] = [
+    "s16le",
+    "rawvideo",
+    "pcm_s16le",
+    "libx264",
+    "aac",
+    "lavfi",
+    "testsrc",
+];
+
+#[cfg(test)]
+const REQUIRED_TEST_MUXERS: [&str; 2] = ["s16le", "rawvideo"];
+#[cfg(test)]
+const REQUIRED_TEST_ENCODERS: [&str; 4] = ["rawvideo", "pcm_s16le", "libx264", "aac"];
+#[cfg(test)]
+const REQUIRED_TEST_DEVICES: [&str; 1] = ["lavfi"];
+#[cfg(test)]
+const REQUIRED_TEST_FILTERS: [&str; 1] = ["testsrc"];
+
+/// True when `listing` has an entry whose name column is exactly `name`.
+///
+/// FFmpeg's listings look like `  E  s16le   PCM signed 16-bit...` (muxers,
+/// devices), ` V....D libx264 ...` (encoders) and ` .. testsrc ...` (filters).
+/// Only the "flags then name" columns are considered, so a capability named in
+/// a description or a heading is never mistaken for a real entry.
+#[cfg(test)]
+fn listing_has(listing: &str, name: &str) -> bool {
+    listing.lines().any(|line| {
+        let mut columns = line.split_whitespace();
+        let (Some(flags), Some(entry)) = (columns.next(), columns.next()) else {
+            return false;
+        };
+        flags.len() <= 8
+            && flags.chars().all(|c| c == '.' || c.is_ascii_uppercase())
+            && entry == name
+    })
+}
+
+/// Capabilities required by the test helpers that `listing` outputs do not
+/// provide. Order follows [`REQUIRED_TEST_CAPABILITIES`], without duplicates.
+#[cfg(test)]
+fn missing_test_capabilities(
+    muxers: &str,
+    encoders: &str,
+    devices: &str,
+    filters: &str,
+) -> Vec<&'static str> {
+    let mut missing: Vec<&'static str> = vec![];
+    let mut check = |required: &[&'static str], listing: &str| {
+        for name in required {
+            if !listing_has(listing, name) && !missing.contains(name) {
+                missing.push(name);
+            }
+        }
+    };
+    check(&REQUIRED_TEST_MUXERS, muxers);
+    check(&REQUIRED_TEST_ENCODERS, encoders);
+    check(&REQUIRED_TEST_DEVICES, devices);
+    check(&REQUIRED_TEST_FILTERS, filters);
+    missing
+}
+
+#[cfg(test)]
+fn ffmpeg_listing(path: &Path, flag: &str) -> Option<String> {
+    let output = Command::new(path)
+        .args(["-hide_banner", flag])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut listing = String::from_utf8_lossy(&output.stdout).into_owned();
+    listing.push_str(&String::from_utf8_lossy(&output.stderr));
+    Some(listing)
+}
+
+/// Checks whether `path` is a full-featured FFmpeg that can run the capture
+/// unit tests. A binary that cannot be executed is reported as missing
+/// everything.
+#[cfg(test)]
+fn supports_unit_tests(path: &Path) -> Result<(), Vec<&'static str>> {
+    let Some(muxers) = ffmpeg_listing(path, "-muxers") else {
+        return Err(REQUIRED_TEST_CAPABILITIES.to_vec());
+    };
+    let Some(encoders) = ffmpeg_listing(path, "-encoders") else {
+        return Err(REQUIRED_TEST_CAPABILITIES.to_vec());
+    };
+    let Some(devices) = ffmpeg_listing(path, "-devices") else {
+        return Err(REQUIRED_TEST_CAPABILITIES.to_vec());
+    };
+    let Some(filters) = ffmpeg_listing(path, "-filters") else {
+        return Err(REQUIRED_TEST_CAPABILITIES.to_vec());
+    };
+    let missing = missing_test_capabilities(&muxers, &encoders, &devices, &filters);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
+}
+
+#[cfg(test)]
+fn locate_test_ffmpeg() -> Option<PathBuf> {
+    static SELECTED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SELECTED.get_or_init(select_test_ffmpeg).clone()
+}
+
+#[cfg(test)]
+fn select_test_ffmpeg() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = vec![];
+    let mut push_unique = |path: PathBuf| {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    };
+    for variable in ["LOCUS_TEST_FFMPEG", "LOCUS_FFMPEG"] {
+        if let Some(custom) = std::env::var_os(variable) {
+            push_unique(PathBuf::from(custom));
         }
     }
-    let mut candidates: Vec<PathBuf> = vec![];
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
     {
-        candidates.extend(bundled_candidates(&dir));
-    }
-    // Running from a source checkout (`tauri dev`): the resource folder.
-    candidates.push(PathBuf::from("ffmpeg").join(FFMPEG_NAME));
-    candidates.push(PathBuf::from("src-tauri/ffmpeg").join(FFMPEG_NAME));
-    #[cfg(debug_assertions)]
-    {
-        for fixed in [
-            "/opt/homebrew/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-            "/usr/bin/ffmpeg",
-        ] {
-            candidates.push(PathBuf::from(fixed));
-        }
-        if let Some(path_var) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&path_var) {
-                candidates.push(dir.join(FFMPEG_NAME));
-            }
+        for candidate in bundled_candidates(&dir) {
+            push_unique(candidate);
         }
     }
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    push_unique(PathBuf::from("ffmpeg").join(FFMPEG_NAME));
+    push_unique(PathBuf::from("src-tauri/ffmpeg").join(FFMPEG_NAME));
+    for fixed in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ] {
+        push_unique(PathBuf::from(fixed));
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            push_unique(dir.join(FFMPEG_NAME));
+        }
+    }
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        match supports_unit_tests(&candidate) {
+            Ok(()) => return Some(candidate),
+            Err(missing) => eprintln!(
+                "locus test: skipping {}: it lacks {}. Unit tests need a full-featured \
+                 FFmpeg (set LOCUS_TEST_FFMPEG or install one); the bundled build is \
+                 intentionally minimal.",
+                candidate.display(),
+                missing.join(", ")
+            ),
+        }
+    }
+    eprintln!(
+        "locus test: no full-featured FFmpeg was found. FFmpeg-backed capture tests will be \
+         skipped (set LOCUS_TEST_FFMPEG or install one)."
+    );
+    None
 }
 
 /// Parses `ffmpeg -f avfoundation -list_devices true -i ""` output and returns
@@ -1080,5 +1259,210 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no video"));
+    }
+}
+
+#[cfg(test)]
+mod ffmpeg_capability_tests {
+    use super::*;
+
+    const MINIMAL_MUXERS: &str = "\
+Formats:
+ D.. = Demuxing supported
+ .E. = Muxing supported
+ ---
+  E  mp4             MP4 (MPEG-4 Part 14)
+  E  null            raw null video
+";
+
+    const MINIMAL_ENCODERS: &str = "\
+Encoders:
+ V..... = Video
+ A..... = Audio
+ ------
+ V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)
+ A....D aac                  AAC (Advanced Audio Coding)
+ V....D wrapped_avframe      FFmpeg AVFrame
+ A....D pcm_s16le            PCM signed 16-bit little-endian
+";
+
+    const MINIMAL_DEVICES: &str = "\
+Devices:
+ D. = Demuxing supported
+ .E = Muxing supported
+ ---
+";
+
+    const MINIMAL_FILTERS: &str = "\
+Filters:
+ T.. = Timeline support
+ .S. = Slice threading
+ ..C = Command support
+ A = Audio input/output
+ V = Video input/output
+ | = Source or sink filter
+ ---
+ .. scale            Scale the input video size and/or convert the image format.
+ .. format           Convert the input video to one of the specified pixel formats.
+";
+
+    const FULL_MUXERS: &str = "\
+Formats:
+ D.. = Demuxing supported
+ .E. = Muxing supported
+ ---
+  E  mp4             MP4 (MPEG-4 Part 14)
+  E  null            raw null video
+  E  rawvideo        raw video
+  E  s16le           PCM signed 16-bit little-endian
+";
+
+    const FULL_ENCODERS: &str = "\
+Encoders:
+ V..... = Video
+ A..... = Audio
+ ------
+ V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)
+ A....D aac                  AAC (Advanced Audio Coding)
+ V....D wrapped_avframe      FFmpeg AVFrame
+ A....D pcm_s16le            PCM signed 16-bit little-endian
+ V....D rawvideo             raw video
+";
+
+    const FULL_DEVICES: &str = "\
+Devices:
+ D. = Demuxing supported
+ .E = Muxing supported
+ ---
+ D  lavfi           Libavfilter virtual input device
+";
+
+    const FULL_FILTERS: &str = "\
+Filters:
+ T.. = Timeline support
+ .S. = Slice threading
+ ..C = Command support
+ A = Audio input/output
+ V = Video input/output
+ | = Source or sink filter
+ ---
+ .. scale            Scale the input video size and/or convert the image format.
+ .. format           Convert the input video to one of the specified pixel formats.
+ .. testsrc          |->V       Generate test pattern.
+";
+
+    #[test]
+    fn minimal_build_lacks_every_test_capability() {
+        assert_eq!(
+            missing_test_capabilities(
+                MINIMAL_MUXERS,
+                MINIMAL_ENCODERS,
+                MINIMAL_DEVICES,
+                MINIMAL_FILTERS
+            ),
+            vec!["s16le", "rawvideo", "lavfi", "testsrc"]
+        );
+    }
+
+    #[test]
+    fn full_build_reports_nothing_missing() {
+        assert!(
+            missing_test_capabilities(FULL_MUXERS, FULL_ENCODERS, FULL_DEVICES, FULL_FILTERS)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rawvideo_in_a_description_is_not_a_muxer() {
+        let muxers = "\
+Formats:
+ D.. = Demuxing supported
+ .E. = Muxing supported
+ ---
+  E  mp4             MP4 (MPEG-4 Part 14)
+  E  null            rawvideo passthrough
+  E  s16le           PCM signed 16-bit little-endian
+rawvideo
+";
+        assert_eq!(
+            missing_test_capabilities(muxers, FULL_ENCODERS, FULL_DEVICES, FULL_FILTERS),
+            vec!["rawvideo"]
+        );
+    }
+
+    #[test]
+    fn a_binary_that_cannot_run_is_missing_everything() {
+        assert_eq!(
+            supports_unit_tests(Path::new("/definitely/not/a/real/ffmpeg")).unwrap_err(),
+            REQUIRED_TEST_CAPABILITIES.to_vec()
+        );
+    }
+
+    #[cfg(unix)]
+    fn fake_ffmpeg(
+        dir: &Path,
+        name: &str,
+        muxers: &str,
+        encoders: &str,
+        devices: &str,
+        filters: &str,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$2\" in\n\
+             -muxers) cat <<'EOF'\n{muxers}EOF\n;;\n\
+             -encoders) cat <<'EOF'\n{encoders}EOF\n;;\n\
+             -devices) cat <<'EOF'\n{devices}EOF\n;;\n\
+             -filters) cat <<'EOF'\n{filters}EOF\n;;\n\
+             *) exit 1 ;;\n\
+             esac\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_probe_rejects_the_minimal_build_and_accepts_a_full_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let minimal = fake_ffmpeg(
+            dir.path(),
+            "minimal-ffmpeg",
+            MINIMAL_MUXERS,
+            MINIMAL_ENCODERS,
+            MINIMAL_DEVICES,
+            MINIMAL_FILTERS,
+        );
+        assert_eq!(
+            supports_unit_tests(&minimal).unwrap_err(),
+            vec!["s16le", "rawvideo", "lavfi", "testsrc"]
+        );
+
+        let full = fake_ffmpeg(
+            dir.path(),
+            "full-ffmpeg",
+            FULL_MUXERS,
+            FULL_ENCODERS,
+            FULL_DEVICES,
+            FULL_FILTERS,
+        );
+        assert!(supports_unit_tests(&full).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_probe_fails_when_a_listing_command_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken-ffmpeg");
+        std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            supports_unit_tests(&path).unwrap_err(),
+            REQUIRED_TEST_CAPABILITIES.to_vec()
+        );
     }
 }
