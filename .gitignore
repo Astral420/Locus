@@ -39,6 +39,12 @@ src-tauri/llama-engine/*
 05-qualification.md
 06-license-notices.md
 
+
+EXEC-1-capture-tests.md
+EXEC-2-llama-summarization-chat.md
+EXEC-3-diarization.md
+
+
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
