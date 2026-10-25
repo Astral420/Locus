@@ -8,7 +8,15 @@ Already committed an earlier version? Just overwrite and review the diff:
     git diff --stat        # only the newest changes show up
 
 Then:  pnpm test && cargo test --manifest-path src-tauri/Cargo.toml --lib
-Local dev: export LOCUS_FFMPEG=$(which ffmpeg)
+
+Local dev: the bundled FFmpeg is intentionally minimal, so the FFmpeg-backed
+`capture::*` tests skip it. Point them at a full-featured FFmpeg (with
+`ffprobe` on `PATH`) instead of overriding the app's bundled binary:
+
+    LOCUS_TEST_FFMPEG=$(which ffmpeg) cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+To make the app itself use a system FFmpeg during development, set
+`LOCUS_FFMPEG` instead (debug builds also find one on `PATH`).
 
 ## Debugging A/V sync
 Every recording with video now gets  <media>/<meeting id>/sync-report.txt
