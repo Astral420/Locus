@@ -9,11 +9,32 @@ import { PathChip } from "../components/ui/PathChip";
 import { SettingsCard, SettingsRow, SectionLabel } from "../components/ui/SettingsCard";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { useUiStore, type ThemeMode } from "../stores/uiStore";
-import { checkForUpdate, configureProvider, getGpuBackend, getStorageInfo, listProviderConfigs, migrateModels, saveProviderApiKey, type GpuBackendDTO, type ProviderConfigDTO, type StorageInfoDTO } from "../lib/tauri";
+import {
+  checkForUpdate,
+  configureProvider,
+  getGpuBackend,
+  getLlamaBackend,
+  getSelectedProvider,
+  getStorageInfo,
+  listModels,
+  listProviderConfigs,
+  migrateModels,
+  saveProviderApiKey,
+  selectProvider,
+  type GpuBackendDTO,
+  type LlamaRuntimeInfoDTO,
+  type ModelAssetDTO,
+  type ProviderConfigDTO,
+  type ProviderSnapshotDTO,
+  type StorageInfoDTO,
+} from "../lib/tauri";
 import { Settings, Palette, Mic, HardDrive, Shield, Lock, Cpu, Server, Cloud } from "lucide-react";
 
 type RemoteProviderId = "ollama" | "openai" | "anthropic" | "gemini";
 type ProviderId = "llama_server" | RemoteProviderId;
+
+/** Loopback only: local llama.cpp never leaves the machine (ADR 0003). */
+const LOCAL_DESTINATION = "http://127.0.0.1 (local, offline)";
 type SettingsCategory = "general" | "appearance" | "recording" | "storage" | "privacy" | ProviderId;
 
 interface RemoteProviderSpec {
@@ -45,14 +66,25 @@ export const SettingsContent: React.FC = () => {
   const queryClient = useQueryClient();
   const { theme, setTheme } = useUiStore();
 
-  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("llama_server");
+  // The provider is never assumed: it is whatever the user explicitly selected last
+  // (persisted by the backend), and nothing is selected on a fresh install.
+  const [pendingSelection, setPendingSelection] = useState<ProviderId | null>(null);
   const [forms, setForms] = useState<Partial<Record<RemoteProviderId, RemoteForm>>>({});
   const [providerMessage, setProviderMessage] = useState<string | null>(null);
+  const [providerMessageIsError, setProviderMessageIsError] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const [defaults, setDefaults] = useState({ systemAudio: true, screenVideo: true, threeHourBanner: true });
   const { data: providerConfigs = [] } = useQuery<ProviderConfigDTO[]>({ queryKey: ["provider-configs"], queryFn: listProviderConfigs });
   const { data: storage } = useQuery<StorageInfoDTO>({ queryKey: ["storage-info"], queryFn: getStorageInfo });
   const { data: gpu } = useQuery<GpuBackendDTO>({ queryKey: ["gpu-backend"], queryFn: getGpuBackend });
+  const { data: llama, error: llamaError } = useQuery<LlamaRuntimeInfoDTO>({ queryKey: ["llama-backend"], queryFn: getLlamaBackend });
+  const { data: selectedSnapshot } = useQuery<ProviderSnapshotDTO | null>({
+    queryKey: ["selected-provider"],
+    queryFn: getSelectedProvider,
+  });
+  const { data: models = [] } = useQuery<ModelAssetDTO[]>({ queryKey: ["models"], queryFn: listModels });
+  const selectedProvider: ProviderId | null = pendingSelection ?? selectedSnapshot?.provider ?? null;
+  const activeGenerationModel = models.find((model) => model.role === "llm" && model.status === "active");
 
   const generalCategories = [
     { id: "general", label: "General", icon: Settings },
@@ -66,8 +98,12 @@ export const SettingsContent: React.FC = () => {
     "w-full max-w-[640px] h-9 px-3 rounded-lg border border-border bg-bg text-xs font-mono text-ink placeholder:text-ink-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
   const configFor = (id: ProviderId) => providerConfigs.find((c) => c.provider === id);
-  const providerLabel = (id: ProviderId) =>
-    id === "llama_server" ? "Llama.cpp (local, offline)" : REMOTE_PROVIDERS.find((p) => p.id === id)!.label;
+  const providerLabel = (id: ProviderId | null) =>
+    id === null
+      ? "none selected yet"
+      : id === "llama_server"
+        ? "Llama.cpp (local, offline)"
+        : REMOTE_PROVIDERS.find((p) => p.id === id)!.label;
 
   const formValue = (spec: RemoteProviderSpec, field: "endpoint" | "model") => {
     const edited = forms[spec.id]?.[field];
@@ -126,6 +162,27 @@ export const SettingsContent: React.FC = () => {
     <div className="px-3 pt-2 pb-1 text-[11px] uppercase tracking-[0.08em] text-ink-subtle">{text}</div>
   );
 
+  /**
+   * A click on "Select" is the explicit act ADR 0003 requires. Local selection is
+   * persisted through the backend; nothing is ever selected automatically.
+   */
+  const chooseProvider = (id: ProviderId) => {
+    setProviderMessage(null);
+    setProviderMessageIsError(false);
+    setPendingSelection(id);
+    if (id !== "llama_server") return;
+    void selectProvider("llama_server", activeGenerationModel?.id ?? "local", LOCAL_DESTINATION, true)
+      .then(() => {
+        setProviderMessage("Llama.cpp is the selected provider. Summaries and Knowledge answers run on this machine.");
+        void queryClient.invalidateQueries({ queryKey: ["selected-provider"] });
+      })
+      .catch((error: unknown) => {
+        setPendingSelection(null);
+        setProviderMessageIsError(true);
+        setProviderMessage(error instanceof Error ? error.message : "Provider selection failed.");
+      });
+  };
+
   const policyCard = (
     <SettingsCard title="Authorization">
       <SettingsRow
@@ -145,7 +202,7 @@ export const SettingsContent: React.FC = () => {
   );
 
   const selectButton = (id: ProviderId) => (
-    <Button variant={selectedProvider === id ? "primary" : "secondary"} size="sm" onClick={() => setSelectedProvider(id)}>
+    <Button variant={selectedProvider === id ? "primary" : "secondary"} size="sm" onClick={() => chooseProvider(id)}>
       {selectedProvider === id ? "Selected (Active)" : "Select"}
     </Button>
   );
@@ -273,14 +330,60 @@ export const SettingsContent: React.FC = () => {
               <SettingsCard title="Llama.cpp">
                 <SettingsRow
                   label="Local Language Model"
-                  description="Private loopback inference, zero data leaves machine"
+                  description={
+                    activeGenerationModel
+                      ? `Private loopback inference on ${activeGenerationModel.name}. Zero data leaves this machine.`
+                      : "Private loopback inference, zero data leaves machine. Download a model in Models first."
+                  }
                   control={selectButton("llama_server")}
                 />
+                {providerMessage && (
+                  <div className="py-3">
+                    <p role={providerMessageIsError ? "alert" : "status"} className={"text-xs " + (providerMessageIsError ? "text-status-error" : "text-green-text")}>{providerMessage}</p>
+                  </div>
+                )}
               </SettingsCard>
               <SettingsCard title="Inference Backend">
                 <SettingsRow
-                  label={`Backend: ${gpu ? gpu.backend.toUpperCase() : "Detecting…"}`}
-                  description={gpu?.reason ?? "Probing the hardware that runs local summarization and embeddings."}
+                  label={`Backend: ${llama ? llama.backend.toUpperCase() : llamaError ? "Unavailable" : "Detecting…"}`}
+                  description={
+                    llamaError instanceof Error
+                      ? llamaError.message
+                      : llama?.reason ?? "Probing the llama.cpp runtime that runs local summarization and chat."
+                  }
+                  control={
+                    llama ? (
+                      <Badge variant={llama.backend === "Cpu" ? "neutral" : "green"} size="sm">
+                        {llama.backend === "Cpu" ? "CPU" : llama.backend}
+                      </Badge>
+                    ) : undefined
+                  }
+                />
+                {llama?.device_name && (
+                  <SettingsRow
+                    label="Device"
+                    control={<span className="text-xs text-ink-muted">{llama.device_name}{llama.device_index !== null ? ` · device ${llama.device_index}` : ""}</span>}
+                  />
+                )}
+                {llama && (
+                  <SettingsRow
+                    label="Engine"
+                    description={`${llama.engine_source.replace("_", " ")} · ${llama.engine_path}`}
+                    control={
+                      <Badge variant={llama.patched ? "green" : "neutral"} size="sm">
+                        {llama.patched ? "Patched engine" : "Stock engine"}
+                      </Badge>
+                    }
+                  />
+                )}
+                {llama?.llama_commit && (
+                  <SettingsRow label="llama.cpp commit" control={<span className="text-xs font-mono text-ink-muted">{llama.llama_commit.slice(0, 12)}</span>} />
+                )}
+              </SettingsCard>
+              <SettingsCard title="Transcription Backend (whisper.cpp)">
+                <SettingsRow
+                  label="Transcription backend"
+                  description={gpu?.reason ?? "Probing the hardware that runs local transcription."}
                   control={gpu ? <Badge variant={gpu.backend === "cpu" ? "neutral" : "green"} size="sm">{gpu.backend.toUpperCase()}</Badge> : undefined}
                 />
                 {gpu && (
