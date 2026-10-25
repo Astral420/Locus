@@ -5,7 +5,7 @@ use crate::{
     },
     llm::{
         backend::{detect_llama_backend, LlamaBackend},
-        engine::resolve_llama_server,
+        engine::resolved_engine,
         llama_cpp::{LlamaServerConfig, LlamaServerManager},
         model_manager::{EmbeddingModelCatalogEntry, EmbeddingModelManager},
         providers::build_provider,
@@ -299,9 +299,10 @@ pub fn select_embedding_model(
 }
 
 pub(crate) fn embedding_provider(state: &AppState) -> Result<LlamaEmbeddingProvider, String> {
-    let binary = resolve_llama_server().binary;
+    // The engine and the backend decision each log once, from their own module;
+    // repeating it here made every request print a third, duplicate line.
+    let binary = resolved_engine().binary.clone();
     let choice = detect_llama_backend();
-    eprintln!("llama backend: {:?} ({})", choice.backend, choice.reason);
     embedding_provider_with(
         &state.embedding_models,
         &state.embedding_server,

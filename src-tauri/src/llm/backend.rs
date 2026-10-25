@@ -4,8 +4,9 @@
 //! Intel-macOS engine exposes Metal devices through `--list-devices`, while a
 //! stock engine has no manifest and must never be assumed to support AMD Metal.
 
-use super::engine::{resolve_llama_server, ResolvedEngine};
+use super::engine::{resolved_engine, EngineSource, ResolvedEngine};
 use crate::transcription::{detect_backend, BackendKind};
+use serde::Serialize;
 use std::{
     path::Path,
     process::{Command, Stdio},
@@ -313,7 +314,7 @@ pub fn detect_llama_backend() -> BackendChoice {
     static CACHE: OnceLock<BackendChoice> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let engine = resolve_llama_server();
+            let engine = resolved_engine();
             let device_override = std::env::var(DEVICE_ENV).ok();
             let overridden = parse_override(device_override.as_deref());
             let macos_x86_64 = cfg!(all(target_os = "macos", target_arch = "x86_64"));
@@ -347,7 +348,7 @@ pub fn detect_llama_backend() -> BackendChoice {
             let input = DetectInput {
                 macos_x86_64,
                 apple_silicon,
-                engine: &engine,
+                engine,
                 list_devices: list_devices.as_deref(),
                 device_override: device_override.as_deref(),
             };
@@ -359,6 +360,55 @@ pub fn detect_llama_backend() -> BackendChoice {
             choice
         })
         .clone()
+}
+
+fn engine_source_label(source: EngineSource) -> &'static str {
+    match source {
+        EngineSource::EnvOverride => "env_override",
+        EngineSource::Bundled => "bundled",
+        EngineSource::Path => "path",
+    }
+}
+
+/// What the Settings screen and the logs need to explain a local result:
+/// which backend runs, on which device, from which binary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LlamaRuntimeInfo {
+    pub backend: String,
+    pub device_name: Option<String>,
+    pub device_index: Option<u32>,
+    pub reason: String,
+    pub engine_source: String,
+    pub engine_path: String,
+    pub patched: bool,
+    pub toshllm_tag: Option<String>,
+    pub llama_commit: Option<String>,
+}
+
+pub fn llama_runtime_info() -> LlamaRuntimeInfo {
+    let engine = resolved_engine();
+    let choice = detect_llama_backend();
+    let (device_name, device_index) = match &choice.backend {
+        LlamaBackend::MetalAmd {
+            device_index,
+            device_name,
+        } => (Some(device_name.clone()), Some(*device_index)),
+        _ => (None, None),
+    };
+    LlamaRuntimeInfo {
+        backend: backend_label(&choice.backend),
+        device_name,
+        device_index,
+        reason: choice.reason,
+        engine_source: engine_source_label(engine.source).into(),
+        engine_path: engine.binary.display().to_string(),
+        patched: engine.manifest.is_some(),
+        toshllm_tag: engine.manifest.as_ref().map(|manifest| manifest.toshllm_tag.clone()),
+        llama_commit: engine
+            .manifest
+            .as_ref()
+            .map(|manifest| manifest.llama_commit.clone()),
+    }
 }
 
 fn run_list_devices(binary: &Path) -> Result<String, String> {
