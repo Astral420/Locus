@@ -10,8 +10,25 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-const MAX_SINGLE_CONTEXT_CHARS: usize = 24_000;
-const HIERARCHICAL_CHUNK_CHARS: usize = 12_000;
+/// Prompt sizes are counted in characters because that is how the transcript is
+/// measured; the engine's window is counted in tokens. English runs at roughly
+/// three characters per token, so this limit keeps
+/// `MAX_SINGLE_CONTEXT_CHARS / 3 + max_tokens` (9_000 / 3 + 4_096 = 7_096) below
+/// `DEFAULT_GENERATION_CONTEXT` (8_192), leaving about 1_000 tokens for the
+/// prompt's own instructions and the model's chat template.
+const MAX_SINGLE_CONTEXT_CHARS: usize = 9_000;
+/// One hierarchical passage, small enough that a passage plus its folded note
+/// still fits the same window.
+const HIERARCHICAL_CHUNK_CHARS: usize = 4_000;
+/// Notes are short on purpose: a full-size completion per passage would push the
+/// folded second pass out of the window on long recordings.
+const INTERMEDIATE_MAX_TOKENS: u32 = 700;
+/// Folding halves the text roughly fivefold per pass, so this bound is only ever
+/// reached by pathological input; running out means the engine reports the real
+/// context error rather than silently dropping transcript content.
+const MAX_FOLD_PASSES: usize = 4;
+/// Tokens reserved for a summary completion.
+const SUMMARY_MAX_TOKENS: u32 = 4_096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Citation {
@@ -459,33 +476,44 @@ impl SummarizationService {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let response = if transcript.len() + slide_text.len() <= MAX_SINGLE_CONTEXT_CHARS {
+        let fold = |passage: &str| -> Result<String, LlmError> {
+            let request = ChatCompletionRequest {
+                model: snapshot.model.clone(),
+                messages: vec![
+                    ChatMessage::system(PromptRouter::system_prompt(route.kind)),
+                    ChatMessage::user(format!(
+                        "Summarize this sequential transcript passage into concise evidence-preserving notes. Keep action items, decisions, people, dates, and source IDs. Do not omit content because later passages may depend on it.\n\n{passage}"
+                    )),
+                ],
+                temperature: 0.1,
+                max_tokens: Some(INTERMEDIATE_MAX_TOKENS),
+            };
+            provider.complete(&request).map(|response| response.content)
+        };
+        let response = if transcript.chars().count() + slide_text.chars().count()
+            <= MAX_SINGLE_CONTEXT_CHARS
+        {
             self.complete(provider, snapshot, route.kind, &transcript, &slide_text)?
         } else {
-            let mut intermediate = Vec::new();
-            for chunk in transcript.as_bytes().chunks(HIERARCHICAL_CHUNK_CHARS) {
-                let chunk = String::from_utf8_lossy(chunk);
-                let prompt = format!(
-                    "Summarize this sequential transcript passage into concise evidence-preserving notes. Keep action items, decisions, people, dates, and source IDs. Do not omit content because later passages may depend on it.\n\n{chunk}"
-                );
-                let request = ChatCompletionRequest {
-                    model: snapshot.model.clone(),
-                    messages: vec![
-                        ChatMessage::system(PromptRouter::system_prompt(route.kind)),
-                        ChatMessage::user(prompt),
-                    ],
-                    temperature: 0.1,
-                    max_tokens: Some(4096),
-                };
-                intermediate.push(provider.complete(&request)?.content);
+            let mut notes = char_chunks(&transcript, HIERARCHICAL_CHUNK_CHARS)
+                .into_iter()
+                .map(fold)
+                .collect::<Result<Vec<_>, LlmError>>()?
+                .join("\n\n--- NEXT PASS ---\n\n");
+            // The folded notes are the prompt of the final pass, so they have to
+            // respect the same window the transcript did.
+            let mut passes = 0;
+            while notes.chars().count() + slide_text.chars().count() > MAX_SINGLE_CONTEXT_CHARS
+                && passes < MAX_FOLD_PASSES
+            {
+                notes = char_chunks(&notes, HIERARCHICAL_CHUNK_CHARS)
+                    .into_iter()
+                    .map(fold)
+                    .collect::<Result<Vec<_>, LlmError>>()?
+                    .join("\n\n--- NEXT PASS ---\n\n");
+                passes += 1;
             }
-            self.complete(
-                provider,
-                snapshot,
-                route.kind,
-                &intermediate.join("\n\n--- NEXT PASS ---\n\n"),
-                &slide_text,
-            )?
+            self.complete(provider, snapshot, route.kind, &notes, &slide_text)?
         };
         parse_generated_summary(&response)
     }
@@ -506,7 +534,7 @@ impl SummarizationService {
                     ChatMessage::user(PromptRouter::user_prompt(kind, transcript, slide_text)),
                 ],
                 temperature: 0.1,
-                max_tokens: Some(4096),
+                max_tokens: Some(SUMMARY_MAX_TOKENS),
             })
             .map(|response| response.content)
     }
@@ -763,6 +791,28 @@ fn validate_payload(payload: &GeneratedSummary, context: &SummaryContext) -> Res
     Ok(())
 }
 
+/// Split at character boundaries, never inside a multi-byte character. Slicing
+/// the byte vector directly, as this used to, replaced whatever character
+/// straddled a boundary with U+FFFD and sent that to the model.
+fn char_chunks(text: &str, limit: usize) -> Vec<&str> {
+    let limit = limit.max(1);
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut chars_in_chunk = 0;
+    for (index, _) in text.char_indices() {
+        if chars_in_chunk == limit {
+            chunks.push(&text[start..index]);
+            start = index;
+            chars_in_chunk = 0;
+        }
+        chars_in_chunk += 1;
+    }
+    if start < text.len() {
+        chunks.push(&text[start..]);
+    }
+    chunks
+}
+
 fn parse_generated_summary(content: &str) -> Result<GeneratedSummary, LlmError> {
     let trimmed = content.trim();
     let json = trimmed
@@ -960,6 +1010,132 @@ mod tests {
             destination: "127.0.0.1".into(),
             selected_at: "now".into(),
             disclosure: "local".into(),
+        }
+    }
+
+    #[test]
+    fn passages_split_on_character_boundaries_without_replacement_characters() {
+        // Two-byte accented letters and a four-byte emoji, both of which used to
+        // be corrupted when a byte chunk cut through them.
+        for text in ["é".repeat(10), "👩‍💻 meeting notes ".repeat(4)] {
+            let chunks = char_chunks(&text, 4);
+            assert_eq!(chunks.concat(), text);
+            for chunk in &chunks {
+                assert!(!chunk.contains('\u{FFFD}'), "chunk lost a character: {chunk:?}");
+                assert!(chunk.chars().count() <= 4, "chunk too long: {chunk:?}");
+            }
+            assert!(chunks.len() > 1);
+        }
+        assert!(char_chunks("", 4).is_empty());
+    }
+
+    #[test]
+    fn the_single_pass_limit_leaves_room_for_the_summary_completion() {
+        let prompt_tokens = MAX_SINGLE_CONTEXT_CHARS / 3;
+        let context = crate::llm::llama_cpp::DEFAULT_GENERATION_CONTEXT as usize;
+        let reserved = prompt_tokens + SUMMARY_MAX_TOKENS as usize;
+        assert!(
+            reserved < context,
+            "{reserved} tokens do not fit a {context}-token window"
+        );
+        // The instructions around the transcript need their own headroom.
+        assert!(context - reserved >= 500);
+        // A folded passage plus its note must fit the same window.
+        let passage = HIERARCHICAL_CHUNK_CHARS / 3 + INTERMEDIATE_MAX_TOKENS as usize;
+        assert!(
+            passage < context,
+            "a hierarchical passage ({passage} tokens) does not fit the window"
+        );
+    }
+
+    /// Records what each pass actually sent, so the window arithmetic can be
+    /// checked against the requests instead of the constants.
+    struct RecordingProvider {
+        response: String,
+        requests: std::sync::Mutex<Vec<(usize, u32)>>,
+    }
+
+    impl CompletionProvider for RecordingProvider {
+        fn complete(
+            &self,
+            request: &ChatCompletionRequest,
+        ) -> Result<super::super::ChatCompletionResponse, LlmError> {
+            let chars = request
+                .messages
+                .iter()
+                .map(|message| message.content.chars().count())
+                .sum::<usize>();
+            self.requests
+                .lock()
+                .unwrap()
+                .push((chars, request.max_tokens.unwrap_or(0)));
+            let is_fold = request.messages.iter().any(|message| {
+                message
+                    .content
+                    .starts_with("Summarize this sequential transcript passage")
+            });
+            Ok(super::super::ChatCompletionResponse {
+                content: if is_fold {
+                    "note: the team agreed on a sprint date. ".repeat(4)
+                } else {
+                    self.response.clone()
+                },
+                model: Some("fake".into()),
+                prompt_tokens: None,
+                completion_tokens: None,
+            })
+        }
+    }
+
+    #[test]
+    fn long_transcripts_are_folded_inside_the_generation_window() {
+        let db = fixture_db();
+        // About 48k characters of speech, far beyond one pass.
+        let long = "The team agreed to ship the sprint by Friday. ".repeat(1_100);
+        db.run({
+            let long = long.clone();
+            move |connection| {
+                connection
+                    .execute(
+                        "UPDATE transcript_segments SET text=?1 WHERE id='seg1'",
+                        [&long],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        })
+        .unwrap();
+        let service = SummarizationService::new(db.clone());
+        let fake = RecordingProvider {
+            response: serde_json::json!({
+                "title": "Sprint delivery",
+                "overview": "The team agreed on a sprint delivery date.",
+                "decisions": ["Ship by Friday"],
+                "action_items": [],
+                "citations": [],
+                "key_concepts": [], "assignments": [], "important_dates": [], "disclosures": []
+            })
+            .to_string(),
+            requests: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let revision = service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap();
+        assert_eq!(revision.revision, 1);
+
+        let requests = fake.requests.lock().unwrap();
+        assert!(
+            requests.len() > 1,
+            "a long transcript must be folded in several passes"
+        );
+        let context = crate::llm::llama_cpp::DEFAULT_GENERATION_CONTEXT as usize;
+        for (chars, max_tokens) in requests.iter() {
+            let tokens = chars / 3 + *max_tokens as usize;
+            assert!(
+                tokens < context,
+                "a {chars}-character request reserving {max_tokens} tokens needs {tokens} of {context}"
+            );
         }
     }
 
