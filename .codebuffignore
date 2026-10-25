@@ -1,2 +1,3 @@
 # ignore everything
 !06-license-notices.md
+!EXEC-2-llama-summarization-chat.md
