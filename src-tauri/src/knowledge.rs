@@ -925,15 +925,28 @@ impl KnowledgeService {
             messages.push(ChatMessage::user(format!(
                 "Retrieved sources:\n{context}\n\nQuestion: {content_owned}\nAnswer with concise Markdown and cite sources as [S1], [S2], etc."
             )));
-            completion_provider
-                .complete(&ChatCompletionRequest {
-                    model: snapshot.model.clone(),
-                    messages,
-                    temperature: 0.1,
-                    max_tokens: Some(1200),
-                })
-                .map_err(|error| error.to_string())?
-                .content
+            // A failed completion is visible in the conversation, exactly like a
+            // failed search: the user must see why no answer arrived rather than
+            // an empty thread or a fabricated one.
+            match completion_provider.complete(&ChatCompletionRequest {
+                model: snapshot.model.clone(),
+                messages,
+                temperature: 0.1,
+                max_tokens: Some(1200),
+            }) {
+                Ok(response) => response.content,
+                Err(error) => {
+                    let _ = self.insert_message(
+                        &thread_id_owned,
+                        "assistant",
+                        &format!("I couldn't generate an answer: {error}"),
+                        &provider_identity,
+                        &snapshot.model,
+                        "error",
+                    );
+                    return Err(error.to_string());
+                }
+            }
         };
         let assistant_id = self.insert_message(
             &thread_id_owned,

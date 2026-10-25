@@ -31,10 +31,17 @@ pub struct LlamaServerConfig {
     pub llama_backend: Option<LlamaBackend>,
     /// Generation context size; ignored by backends that do not take `-c`.
     pub context_size: Option<u32>,
+    /// When set, the child's stdout and stderr are appended to this file and the
+    /// last lines are quoted in startup errors. When `None` the output is
+    /// discarded, which is only right for tests.
+    pub log_path: Option<PathBuf>,
 }
 
 const EMBEDDING_GPU_ENV: &str = "LOCUS_LLAMA_EMBEDDING_GPU";
-const DEFAULT_GENERATION_CONTEXT: u32 = 8192;
+/// Default generation window. Summarization sends at most
+/// `MAX_SINGLE_CONTEXT_CHARS` (see `llm::summarization`) so the prompt and the
+/// reserved completion must fit here together.
+pub const DEFAULT_GENERATION_CONTEXT: u32 = 8192;
 const METAL_AMD_GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl LlamaServerConfig {
@@ -49,6 +56,7 @@ impl LlamaServerConfig {
             gpu_backend: None,
             llama_backend: None,
             context_size: None,
+            log_path: None,
         }
     }
 
@@ -122,6 +130,16 @@ fn build_legacy_spec(
             "0".into(),
         ]);
         environment.extend(vulkan_environment().map(|(key, value)| (key.into(), value)));
+    }
+    if !config.embedding {
+        // Metal takes every layer; embeddings keep their existing flags.
+        if backend == BackendKind::Metal {
+            args.extend(["-ngl".into(), "99".into()]);
+        }
+        // Only generation takes `-c`, and only when the caller sized the window.
+        if let Some(context_size) = config.context_size {
+            args.extend(["-c".into(), context_size.to_string()]);
+        }
     }
     LlamaLaunchSpec {
         args,
@@ -197,6 +215,23 @@ pub fn is_loopback_host(host: IpAddr) -> bool {
     host.is_loopback()
 }
 
+/// Whether the server in a slot may serve the wanted model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerPlan {
+    Reuse,
+    Relaunch,
+}
+
+/// A running server is only reused when it was launched with the wanted model
+/// path and still answers health checks; every other state relaunches it. Used
+/// for both the embedding and the generation slot so the two roles behave alike.
+pub fn plan_server(current: Option<(Option<&Path>, bool)>, wanted: &Path) -> ServerPlan {
+    match current {
+        Some((Some(path), true)) if path == wanted => ServerPlan::Reuse,
+        _ => ServerPlan::Relaunch,
+    }
+}
+
 /// Owns a llama-server child process. The server is always bound to loopback
 /// and every launch receives a fresh bearer token.
 pub struct LlamaServerManager {
@@ -233,14 +268,23 @@ impl LlamaServerManager {
         let startup_timeout = config.effective_startup_timeout();
         let auth_token = Uuid::new_v4().to_string();
         let launch = build_launch_spec(&config, port);
+        let log_file = open_log(&config.log_path)?;
         let mut command = Command::new(&config.binary_path);
-        command
-            .args(&launch.args)
-            .arg("--api-key")
-            .arg(&auth_token)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.args(&launch.args).arg("--api-key").arg(&auth_token);
+        command.stdin(Stdio::null());
+        match &log_file {
+            Some(file) => {
+                command.stdout(Stdio::from(file.try_clone().map_err(|error| {
+                    LlmError::Configuration(format!("could not duplicate the engine log: {error}"))
+                })?));
+                command.stderr(Stdio::from(file.try_clone().map_err(|error| {
+                    LlmError::Configuration(format!("could not duplicate the engine log: {error}"))
+                })?));
+            }
+            None => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
         for key in &launch.environment_removed {
             command.env_remove(key);
         }
@@ -263,9 +307,10 @@ impl LlamaServerManager {
                 return Ok(manager);
             }
             if Instant::now() >= deadline {
-                return Err(LlmError::Request(
-                    "llama-server did not become healthy before the startup deadline".into(),
-                ));
+                return Err(LlmError::Request(format!(
+                    "llama-server did not become healthy before the startup deadline{}",
+                    log_tail(config.log_path.as_deref())
+                )));
             }
             if manager
                 .child
@@ -275,9 +320,10 @@ impl LlamaServerManager {
                 .map_err(|error| LlmError::Request(error.to_string()))?
                 .is_some()
             {
-                return Err(LlmError::Request(
-                    "llama-server exited during startup".into(),
-                ));
+                return Err(LlmError::Request(format!(
+                    "llama-server exited during startup{}",
+                    log_tail(config.log_path.as_deref())
+                )));
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -309,6 +355,9 @@ impl LlamaServerManager {
         }
     }
 
+    /// Raw `/completion` prompt evaluation. Kept for callers that need to send
+    /// an already-formatted prompt; chat requests go through `complete`.
+    #[allow(dead_code)]
     pub fn complete_prompt(&self, prompt: &str, model: &str) -> Result<String, LlmError> {
         let response = self
             .client
@@ -381,22 +430,28 @@ impl LlamaServerManager {
 }
 
 impl CompletionProvider for LlamaServerManager {
+    /// `/v1/chat/completions` so the engine applies the model's own chat
+    /// template, and so `temperature`/`max_tokens` reach the sampler instead of
+    /// being replaced by fixed values.
     fn complete(
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, LlmError> {
-        let prompt = request
-            .messages
-            .iter()
-            .map(|message| format!("{}: {}", message.role, message.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(ChatCompletionResponse {
-            content: self.complete_prompt(&prompt, &request.model)?,
-            model: Some(request.model.clone()),
-            prompt_tokens: None,
-            completion_tokens: None,
-        })
+        let response = self
+            .client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .bearer_auth(&self.auth_token)
+            .json(&serde_json::json!({
+                "model": request.model,
+                "messages": request.messages,
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+                "stream": false,
+            }))
+            .send()
+            .map_err(|error| LlmError::Request(error.to_string()))?;
+        let parsed: ChatCompletionsResponse = parse_json(response)?;
+        parsed.into_response(request.model.clone())
     }
 }
 
@@ -417,6 +472,104 @@ fn find_free_port() -> u16 {
 struct CompletionResponse {
     #[serde(alias = "content", alias = "response")]
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionsResponse {
+    #[serde(default)]
+    choices: Vec<ChatCompletionsChoice>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    usage: Option<ChatCompletionsUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionsChoice {
+    message: ChatCompletionsMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionsMessage {
+    /// `null` is returned by some builds when the model produces no text.
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionsUsage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+}
+
+impl ChatCompletionsResponse {
+    fn into_response(self, requested_model: String) -> Result<ChatCompletionResponse, LlmError> {
+        let content = self
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .ok_or_else(|| {
+                LlmError::InvalidResponse("chat completion contained no message content".into())
+            })?;
+        Ok(ChatCompletionResponse {
+            content,
+            model: self.model.or(Some(requested_model)),
+            prompt_tokens: self.usage.as_ref().and_then(|usage| usage.prompt_tokens),
+            completion_tokens: self.usage.as_ref().and_then(|usage| usage.completion_tokens),
+        })
+    }
+}
+
+/// Opens the engine log in append mode, creating its directory.
+fn open_log(path: &Option<PathBuf>) -> Result<Option<std::fs::File>, LlmError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            LlmError::Configuration(format!(
+                "could not create the engine log directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(Some)
+        .map_err(|error| {
+            LlmError::Configuration(format!(
+                "could not open the engine log at {}: {error}",
+                path.display()
+            ))
+        })
+}
+
+/// The last lines of the engine log, for a startup failure the user can read.
+/// The API token is passed on the command line, never on stdout/stderr.
+fn log_tail(path: Option<&Path>) -> String {
+    const TAIL_LINES: usize = 20;
+    let Some(path) = path else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let start = lines.len().saturating_sub(TAIL_LINES);
+    format!(
+        "\nlast {count} lines of {}:\n{}",
+        path.display(),
+        lines[start..].join("\n"),
+        count = lines.len() - start
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -597,6 +750,19 @@ mod tests {
             "--model",
             "/tmp/model.gguf",
         ];
+        // Apple Metal generation is the one deliberate change to these golden
+        // strings: it now offloads every layer, which the golden recorded before
+        // this task did not.
+        let metal_generation = [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1234",
+            "--model",
+            "/tmp/model.gguf",
+            "-ngl",
+            "99",
+        ];
         let embedding = [
             "--host",
             "127.0.0.1",
@@ -638,7 +804,11 @@ mod tests {
 
         assert_golden(&config_with(BackendKind::Cpu, false), &generation, &[]);
         assert_golden(&config_with(BackendKind::Cpu, true), &embedding, &[]);
-        assert_golden(&config_with(BackendKind::Metal, false), &generation, &[]);
+        assert_golden(
+            &config_with(BackendKind::Metal, false),
+            &metal_generation,
+            &[],
+        );
         assert_golden(&config_with(BackendKind::Metal, true), &embedding, &[]);
         assert_golden(
             &config_with(BackendKind::Vulkan, false),
@@ -711,6 +881,7 @@ mod tests {
 
     #[cfg(unix)]
     const FAKE_SERVER_WITHOUT_SHUTDOWN: &str = r##"#!/usr/bin/env python3
+import json
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -728,32 +899,59 @@ while index < len(args):
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pid"), "w") as pid_file:
     pid_file.write(str(os.getpid()))
 
+print("fake llama-server device: AMD Radeon RX 6600", file=sys.stderr, flush=True)
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _reply(self, status, payload):
+        body = json.dumps(payload).encode("utf-8") if not isinstance(payload, bytes) else payload
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == "/health":
-            body = b'{"status":"ok"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._reply(200, {"status": "ok"})
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._reply(404, {})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
-        if length:
-            self.rfile.read(length)
-        self.send_response(404)
-        self.end_headers()
+        raw = self.rfile.read(length) if length else b"{}"
+        if self.path == "/v1/chat/completions":
+            request = json.loads(raw.decode("utf-8") or "{}")
+            rendered = "|".join(
+                message.get("role", "") + "=" + message.get("content", "")
+                for message in request.get("messages", [])
+            )
+            content = "answer[" + rendered + "]temp=" + str(request.get("temperature")) + ";max=" + str(request.get("max_tokens"))
+            self._reply(
+                200,
+                {
+                    "model": request.get("model", ""),
+                    "choices": [{"message": {"role": "assistant", "content": content}}],
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 4},
+                },
+            )
+        else:
+            self._reply(404, {})
 
 
 HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+"##;
+
+    #[cfg(unix)]
+    const FAKE_SERVER_THAT_EXITS: &str = r##"#!/usr/bin/env python3
+import sys
+
+print("error: failed to load model /tmp/model.gguf", file=sys.stderr, flush=True)
+print("error: unsupported metal device index 7", file=sys.stderr, flush=True)
+sys.exit(1)
 "##;
 
     #[cfg(unix)]
@@ -769,8 +967,13 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
     #[cfg(unix)]
     fn write_executable_script(dir: &Path, contents: &str) -> PathBuf {
+        write_named_executable_script(dir, "fake-llama-server.py", contents)
+    }
+
+    #[cfg(unix)]
+    fn write_named_executable_script(dir: &Path, name: &str, contents: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("fake-llama-server.py");
+        let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -815,6 +1018,124 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             started.elapsed()
         );
         assert!(!process_is_alive(pid));
+    }
+
+    #[cfg(unix)]
+    fn config_for_fake_server(binary: &Path) -> LlamaServerConfig {
+        let mut config = LlamaServerConfig::new(binary);
+        // The fake server only needs a model path to echo; it must exist.
+        config.model_path = None;
+        config
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chat_completion_uses_the_chat_endpoint_and_forwards_sampling_options() {
+        if !python3_available() {
+            eprintln!("skipping chat completion test: python3 is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_executable_script(dir.path(), FAKE_SERVER_WITHOUT_SHUTDOWN);
+        let manager = LlamaServerManager::launch(config_for_fake_server(&binary)).unwrap();
+
+        let response = manager
+            .complete(&ChatCompletionRequest {
+                model: "local-model".into(),
+                messages: vec![
+                    crate::llm::ChatMessage::system("be terse"),
+                    crate::llm::ChatMessage::user("hello"),
+                ],
+                temperature: 0.25,
+                max_tokens: Some(256),
+            })
+            .unwrap();
+
+        // The fake server renders the request it received back into the content,
+        // so roles, temperature and max_tokens prove what went over the wire.
+        assert_eq!(
+            response.content,
+            "answer[system=be terse|user=hello]temp=0.25;max=256"
+        );
+        assert_eq!(response.model.as_deref(), Some("local-model"));
+        assert_eq!(response.prompt_tokens, Some(11));
+        assert_eq!(response.completion_tokens, Some(4));
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_engine_log_captures_the_child_output() {
+        if !python3_available() {
+            eprintln!("skipping engine log test: python3 is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_executable_script(dir.path(), FAKE_SERVER_WITHOUT_SHUTDOWN);
+        let log_path = dir.path().join("logs/llama-generation.log");
+        let mut config = config_for_fake_server(&binary);
+        config.log_path = Some(log_path.clone());
+        let manager = LlamaServerManager::launch(config).unwrap();
+
+        let logged = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(
+            logged.contains("AMD Radeon RX 6600"),
+            "engine log should keep the child's stderr, got: {logged:?}"
+        );
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_startup_failure_quotes_the_engine_log_and_never_the_api_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_named_executable_script(dir.path(), "exiting-server.py", FAKE_SERVER_THAT_EXITS);
+        let log_path = dir.path().join("logs/llama-generation.log");
+        let mut config = config_for_fake_server(&binary);
+        config.log_path = Some(log_path.clone());
+        // Do not wait the default ten seconds for a child that already exited.
+        config.startup_timeout = Duration::from_secs(5);
+
+        let error = match LlamaServerManager::launch(config) {
+            Ok(_) => panic!("a server that exits immediately must not become healthy"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("exited during startup"), "{error}");
+        assert!(error.contains("failed to load model"), "{error}");
+        assert!(error.contains("unsupported metal device index 7"), "{error}");
+
+        let logged = std::fs::read_to_string(&log_path).unwrap_or_default();
+        // The bearer token is passed as an argument, so it must never be in the log.
+        assert!(!logged.contains("--api-key"), "{logged:?}");
+        assert_eq!(logged.matches("error:").count(), 2, "{logged:?}");
+    }
+
+    #[test]
+    fn generation_context_size_is_passed_only_to_generation_servers() {
+        let mut generation = config_with(BackendKind::Cpu, false);
+        generation.context_size = Some(16384);
+        assert_args_contain(&build_launch_spec(&generation, 1234), &["-c", "16384"]);
+
+        let mut embedding = config_with(BackendKind::Cpu, true);
+        embedding.context_size = Some(16384);
+        assert!(!build_launch_spec(&embedding, 1234)
+            .args
+            .iter()
+            .any(|arg| arg == "-c"));
+    }
+
+    #[test]
+    fn apple_metal_generation_offloads_every_layer() {
+        let mut generation = config_with(BackendKind::Metal, false);
+        generation.llama_backend = Some(LlamaBackend::AppleMetal);
+        assert_args_contain(&build_launch_spec(&generation, 1234), &["-ngl", "99"]);
+
+        let mut embedding = config_with(BackendKind::Metal, true);
+        embedding.llama_backend = Some(LlamaBackend::AppleMetal);
+        assert!(!build_launch_spec(&embedding, 1234)
+            .args
+            .iter()
+            .any(|arg| arg == "-ngl"));
     }
 
     /// Manual L2 helper: prints the real machine's launch specs for both roles.

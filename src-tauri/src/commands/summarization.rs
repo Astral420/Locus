@@ -1,16 +1,15 @@
 use crate::{
     contracts::MeetingType,
     llm::{
-        providers::{
-            build_provider, ProviderSelectionService, ProviderSnapshot, RedactedProviderConfig,
-        },
+        generation_server::build_runtime_provider,
+        providers::{ProviderSelectionService, ProviderSnapshot, RedactedProviderConfig},
         summarization::{ActionItemDto, SummarizationService, SummaryRevisionDto},
         ProviderKind,
     },
     AppState,
 };
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectProviderInput {
@@ -97,10 +96,25 @@ pub fn set_meeting_title(
 /// The runtime integration supplies a concrete provider after selection. Until
 /// then this command returns an actionable error and never sends transcript
 /// content to a different provider.
+///
+/// Runs off the UI thread: the first patched-Metal launch compiles shaders and
+/// can take up to two minutes, which would otherwise freeze the window.
 #[tauri::command]
-pub fn trigger_summary(
-    state: State<'_, AppState>,
+pub async fn trigger_summary(
+    app: tauri::AppHandle,
     meeting_id: String,
+    regenerate: bool,
+) -> Result<SummaryRevisionDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        summarize_now(&app.state::<AppState>(), &meeting_id, regenerate)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn summarize_now(
+    state: &AppState,
+    meeting_id: &str,
     regenerate: bool,
 ) -> Result<SummaryRevisionDto, String> {
     let snapshot = state
@@ -108,9 +122,10 @@ pub fn trigger_summary(
         .snapshot()
         .map_err(|error| error.to_string())?;
     let keychain = crate::keychain::Keychain::new("com.locus.app");
-    let provider = build_provider(&snapshot, &keychain).map_err(|error| error.to_string())?;
+    let provider =
+        build_runtime_provider(state, &snapshot, &keychain).map_err(|error| error.to_string())?;
     state.summarization.summarize_with_provider(
-        &meeting_id,
+        meeting_id,
         &snapshot,
         provider.as_ref(),
         regenerate,
@@ -145,11 +160,11 @@ pub fn toggle_action_item(
 }
 
 #[tauri::command]
-pub fn retry_summary(
-    state: State<'_, AppState>,
+pub async fn retry_summary(
+    app: tauri::AppHandle,
     meeting_id: String,
 ) -> Result<SummaryRevisionDto, String> {
-    trigger_summary(state, meeting_id, true)
+    trigger_summary(app, meeting_id, true).await
 }
 
 #[allow(dead_code)]

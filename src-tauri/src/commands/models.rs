@@ -477,6 +477,13 @@ pub fn select_model(
     store_selection(&state.database, &role, &model_id)
 }
 
+/// The llama.cpp engine that generation and embeddings actually use. This is a
+/// different runtime from whisper.cpp, which `get_gpu_backend` describes.
+#[tauri::command]
+pub fn get_llama_backend() -> crate::llm::backend::LlamaRuntimeInfo {
+    crate::llm::backend::llama_runtime_info()
+}
+
 #[tauri::command]
 pub fn get_gpu_backend(_state: State<'_, AppState>) -> GpuBackendDto {
     let backend = detect_backend();

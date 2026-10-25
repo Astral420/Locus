@@ -7,6 +7,7 @@ pub mod anthropic;
 pub mod backend;
 pub mod engine;
 pub mod gemini;
+pub mod generation_server;
 pub mod llama_cpp;
 pub mod model_manager;
 pub mod ollama;
