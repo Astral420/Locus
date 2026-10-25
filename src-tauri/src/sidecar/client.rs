@@ -223,6 +223,23 @@ impl SidecarManager {
     pub fn health(&mut self) -> Result<Value, SidecarError> {
         self.ensure_started()?.health()
     }
+
+    /// Answers `health` only when the sidecar is already running. Status views poll
+    /// this, and they must not spawn a process just to describe it.
+    pub fn health_if_running(&mut self) -> Option<Value> {
+        let client = self.client.as_mut()?;
+        let dead = client
+            .child
+            .try_wait()
+            .map_err(|error| SidecarError::Process(error.to_string()))
+            .ok()?
+            .is_some();
+        if dead {
+            self.shutdown();
+            return None;
+        }
+        client.health().ok()
+    }
     pub fn restart(&mut self) -> Result<Handshake, SidecarError> {
         self.shutdown();
         let client = self.ensure_started()?;
