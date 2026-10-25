@@ -34,3 +34,21 @@ or switch the encoder to an LGPL-compatible path (`h264_videotoolbox` on macOS,
 Development: set `LOCUS_FFMPEG=/path/to/ffmpeg`, drop a binary here, or (debug
 builds only) rely on a system FFmpeg on PATH. Release builds never use a system
 FFmpeg.
+
+## Running the unit tests
+
+The build above is deliberately minimal: it ships only what recording needs, so
+it has no `s16le`/`rawvideo` muxers, no `lavfi` device and no `testsrc` filter.
+The `capture::*` tests use those to decode and count frames, so `cargo test`
+detects the shortfall, prints which capabilities each candidate lacks, skips it,
+and keeps looking for a fuller FFmpeg. Without one, the FFmpeg-backed tests are
+skipped (or fail when `LOCUS_REQUIRE_FFMPEG=1`).
+
+Point the tests at a full-featured FFmpeg without changing the bundled one:
+
+```bash
+LOCUS_TEST_FFMPEG=$(which ffmpeg) cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+`ffprobe` must also be on `PATH` (or next to the FFmpeg you point at); a few
+tests use it to inspect stream timing and dispositions.
