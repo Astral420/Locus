@@ -44,6 +44,17 @@ const EMBEDDING_GPU_ENV: &str = "LOCUS_LLAMA_EMBEDDING_GPU";
 pub const DEFAULT_GENERATION_CONTEXT: u32 = 8192;
 const METAL_AMD_GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Safety net for one generation request, not a throughput limit: prompt
+/// evaluation plus up to `SUMMARY_MAX_TOKENS` tokens on a quantized model can
+/// take minutes, and the blocking reqwest client would otherwise abort at its
+/// 30-second default. Tests shorten this through `set_generation_timeout`.
+pub const GENERATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Health checks are cheap and must never inherit the generation allowance.
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Embeddings are short; a hung embedding server must not stall indexing.
+const EMBEDDING_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl LlamaServerConfig {
     pub fn new(binary_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -240,6 +251,23 @@ pub struct LlamaServerManager {
     base_url: String,
     auth_token: String,
     model: Option<PathBuf>,
+    /// Per-request allowance for generation. The client itself has no total
+    /// timeout; health and embedding requests set their own short ones.
+    generation_timeout: Duration,
+}
+
+fn build_client() -> Result<Client, LlmError> {
+    Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        // No client-wide request timeout: the blocking default is 30 seconds,
+        // which aborts a real summary long before the model finishes.
+        .timeout(None::<Duration>)
+        .build()
+        .map_err(|error| {
+            LlmError::Configuration(format!(
+                "could not create the llama-server HTTP client: {error}"
+            ))
+        })
 }
 
 impl LlamaServerManager {
@@ -296,10 +324,11 @@ impl LlamaServerManager {
             .map_err(|error| LlmError::Request(format!("failed to start llama-server: {error}")))?;
         let manager = Self {
             child: Mutex::new(child),
-            client: Client::new(),
+            client: build_client()?,
             base_url: format!("http://{}:{port}", config.host),
             auth_token,
             model: config.model_path,
+            generation_timeout: GENERATION_REQUEST_TIMEOUT,
         };
         let deadline = Instant::now() + startup_timeout;
         loop {
@@ -346,6 +375,7 @@ impl LlamaServerManager {
             .client
             .get(format!("{}/health", self.base_url))
             .bearer_auth(&self.auth_token)
+            .timeout(HEALTH_CHECK_TIMEOUT)
             .send()
             .map_err(|error| LlmError::Request(error.to_string()))?;
         if response.status().is_success() {
@@ -363,6 +393,7 @@ impl LlamaServerManager {
             .client
             .post(format!("{}/completion", self.base_url))
             .bearer_auth(&self.auth_token)
+            .timeout(self.generation_timeout)
             .json(&serde_json::json!({"prompt": prompt, "n_predict": 4096, "temperature": 0.1, "model": model}))
             .send()
             .map_err(|error| LlmError::Request(error.to_string()))?;
@@ -375,6 +406,7 @@ impl LlamaServerManager {
             .client
             .post(format!("{}/embedding", self.base_url))
             .bearer_auth(&self.auth_token)
+            .timeout(EMBEDDING_REQUEST_TIMEOUT)
             .json(&serde_json::json!({"content": input, "model": model}))
             .send()
             .map_err(|error| LlmError::Request(error.to_string()))?;
@@ -441,6 +473,7 @@ impl CompletionProvider for LlamaServerManager {
             .client
             .post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(&self.auth_token)
+            .timeout(self.generation_timeout)
             .json(&serde_json::json!({
                 "model": request.model,
                 "messages": request.messages,
