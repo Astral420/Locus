@@ -1,6 +1,7 @@
 use crate::db::Database;
 use chrono::Utc;
 use reqwest::blocking::Client;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -594,6 +595,66 @@ impl GenerationModelManager {
         Ok(asset.path.clone())
     }
 
+    /// The generation model the user activated with "Set active", resolved
+    /// against the managed generation folder. A single ready asset is used when
+    /// nothing is stored, mirroring the embedding manager, so a freshly
+    /// downloaded model works before the first explicit selection.
+    pub fn selected(&self) -> Result<GenerationModelAsset, String> {
+        const NO_SELECTION: &str =
+            "No local language model is selected. Download one in Models, then press Set active.";
+        let managed_dir = self.managed_dir.clone();
+        let database = self
+            .database
+            .as_ref()
+            .ok_or_else(|| "generation database is not configured".to_string())?;
+        database
+            .run(move |connection| {
+                let stored: Option<String> = connection
+                    .query_row(
+                        "SELECT value_json FROM settings WHERE key='llm.generation_selection'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?;
+                let selected_id = stored
+                    .as_deref()
+                    .map(|value| value.trim_matches('"').to_string());
+                let mut statement = connection
+                    .prepare(
+                        "SELECT id, catalog_id, artifact_revision, relative_path, sha256 FROM model_assets WHERE role='generation' AND state='ready' ORDER BY catalog_id, artifact_revision",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let ready = statement
+                    .query_map([], |row| {
+                        Ok(ReadyGenerationAsset {
+                            id: row.get(0)?,
+                            catalog_id: row.get(1)?,
+                            artifact_revision: row.get(2)?,
+                            relative_path: row.get(3)?,
+                            sha256: row.get(4)?,
+                        })
+                    })
+                    .map_err(|error| error.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?;
+                let chosen = match selected_id {
+                    Some(id) => ready.into_iter().find(|asset| asset.id == id),
+                    None if ready.len() == 1 => ready.into_iter().next(),
+                    None => None,
+                }
+                .ok_or_else(|| NO_SELECTION.to_string())?;
+                Ok(GenerationModelAsset {
+                    id: chosen.id,
+                    catalog_id: chosen.catalog_id,
+                    artifact_revision: chosen.artifact_revision,
+                    path: managed_dir.join(chosen.relative_path),
+                    sha256: chosen.sha256,
+                })
+            })
+            .map_err(|error| error.to_string())
+    }
+
     pub fn mark_setup_skipped(&self) -> Result<(), String> {
         let Some(database) = &self.database else {
             return Ok(());
@@ -683,6 +744,15 @@ impl GenerationModelManager {
     }
 }
 
+/// One `model_assets` row reduced to what selection needs.
+struct ReadyGenerationAsset {
+    id: String,
+    catalog_id: String,
+    artifact_revision: String,
+    relative_path: String,
+    sha256: String,
+}
+
 fn fraction(received: u64, total: Option<u64>) -> f32 {
     total
         .filter(|total| *total > 0)
@@ -721,6 +791,62 @@ mod tests {
         assert_eq!(manager.select(&asset).unwrap(), asset.path);
         assert!(manager.mark_setup_skipped().is_ok());
         assert!(!AtomicBool::new(false).load(Ordering::Relaxed));
+    }
+
+    fn store_generation_selection(db: &Database, asset: &GenerationModelAsset) {
+        let value = serde_json::to_string(&asset.id).unwrap();
+        db.run(move |connection| {
+            connection
+                .execute(
+                    "INSERT INTO settings(key, value_json, updated_at) VALUES ('llm.generation_selection', ?1, datetime('now')) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+                    [&value],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_activated_generation_model_resolves_inside_the_managed_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("model.gguf");
+        fs::write(&source, b"generation-model").unwrap();
+        let db = Database::in_memory().unwrap();
+        let manager =
+            GenerationModelManager::new(root.path().join("managed")).with_database(db.clone());
+        let asset = manager
+            .import(&source, "generation-test", "r1", None)
+            .unwrap();
+        store_generation_selection(&db, &asset);
+
+        let selected = manager.selected().unwrap();
+        assert_eq!(selected.id, asset.id);
+        assert_eq!(selected.path, asset.path);
+        assert!(selected.path.is_file());
+    }
+
+    #[test]
+    fn a_single_ready_generation_model_is_used_before_any_explicit_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("only.gguf");
+        fs::write(&source, b"only-model").unwrap();
+        let db = Database::in_memory().unwrap();
+        let manager =
+            GenerationModelManager::new(root.path().join("managed")).with_database(db.clone());
+        let asset = manager.import(&source, "only", "r1", None).unwrap();
+
+        assert_eq!(manager.selected().unwrap().id, asset.id);
+    }
+
+    #[test]
+    fn no_generation_model_is_an_actionable_error() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = GenerationModelManager::new(root.path().join("managed"))
+            .with_database(Database::in_memory().unwrap());
+        let error = manager.selected().unwrap_err();
+        assert!(error.contains("No local language model is selected"), "{error}");
+        assert!(error.contains("Set active"), "{error}");
     }
 
     #[test]

@@ -293,6 +293,19 @@ export interface ProviderConfigDTO {
   selected: boolean;
 }
 
+/** The llama.cpp engine summarization and chat actually run on. */
+export interface LlamaRuntimeInfoDTO {
+  backend: string;
+  device_name: string | null;
+  device_index: number | null;
+  reason: string;
+  engine_source: "env_override" | "bundled" | "path";
+  engine_path: string;
+  patched: boolean;
+  toshllm_tag: string | null;
+  llama_commit: string | null;
+}
+
 export interface SummaryActionItemDTO {
   id: string;
   summary_revision_id: string;
@@ -389,6 +402,8 @@ export interface KnowledgeIndexStatusDTO {
   ready_sources: number;
   pending_sources: number;
   error_sources: number;
+  /** "chromadb", "deterministic-fallback" (reduced quality), or "unknown" before the sidecar ran. */
+  vector_backend: string;
 }
 
 export interface EmbeddingModelDTO {
@@ -409,19 +424,28 @@ export function isTauriEnvironment(): boolean {
 }
 
 /**
- * Recording commands must never silently fall back to mock data inside the real
- * app: a failed start would otherwise look like a live recording that captures
- * nothing. Backend errors arrive as plain strings, so normalise them to Error.
+ * Data the user must never see mocked inside the real app: a failed recording,
+ * provider, summary, model or Knowledge request has to surface, because a mock
+ * fallback looks like a successful answer or an installed model. Backend errors
+ * arrive as plain strings, so normalise them to Error. `onError` lets a caller
+ * classify a specific backend error (for example "nothing is selected yet")
+ * without turning every other failure into a value.
  */
-async function invokeStrict<T>(cmd: string, args: Record<string, unknown> | undefined, fallback: () => T): Promise<T> {
+async function invokeStrict<T>(
+  cmd: string,
+  args: Record<string, unknown> | undefined,
+  fallback: () => T,
+  onError?: (error: Error) => T | Promise<T>
+): Promise<T> {
   if (!isTauriEnvironment()) {
     return fallback();
   }
   try {
     return await invoke<T>(cmd, args);
   } catch (err) {
-    if (err instanceof Error) throw err;
-    throw new Error(typeof err === "string" ? err : JSON.stringify(err));
+    const error = err instanceof Error ? err : new Error(typeof err === "string" ? err : JSON.stringify(err));
+    if (onError) return onError(error);
+    throw error;
   }
 }
 
@@ -947,7 +971,7 @@ export async function getSlides(meetingId: string): Promise<SlideDTO[]> {
 }
 
 export function listModels(): Promise<ModelAssetDTO[]> {
-  return safeInvoke("list_models", undefined, () => MOCK_MODELS);
+  return invokeStrict("list_models", undefined, () => MOCK_MODELS);
 }
 
 export interface CatalogRefreshDTO {
@@ -984,7 +1008,9 @@ export async function onModelDownloadProgress(handler: (event: ModelDownloadEven
 }
 
 export function selectModel(modelId: string, role: ModelAssetDTO["role"]): Promise<void> {
-  return safeInvoke("select_model", { modelId, role }, () => undefined);
+  // A swallowed failure here silently looks like an activated model, and local
+  // summarization then has nothing to run on.
+  return invokeStrict("select_model", { modelId, role }, () => undefined);
 }
 
 /** Removes one quantization, or every removable variant when `variantId` is omitted. Resolves with what was freed. */
@@ -1034,8 +1060,14 @@ export function checkForUpdate(endpoint?: string, currentVersion = "0.1.0"): Pro
 
 let mockThreads = [...MOCK_THREADS];
 
+/**
+ * Backend data that must never be replaced by mock data inside the real app:
+ * a failed request has to surface, not look like an empty library, a fake
+ * meeting or a canned answer. Outside Tauri (browser preview and tests) the
+ * mock fallbacks still apply.
+ */
 export function listKnowledgeThreads(): Promise<KnowledgeThreadDTO[]> {
-  return safeInvoke("list_knowledge_threads", undefined, () => mockThreads);
+  return invokeStrict("list_knowledge_threads", undefined, () => mockThreads);
 }
 
 /**
@@ -1052,7 +1084,7 @@ export async function deleteKnowledgeThread(threadId: string): Promise<void> {
 }
 
 export function listDocuments(): Promise<DocumentDTO[]> {
-  return safeInvoke("list_documents", undefined, () => MOCK_DOCUMENTS);
+  return invokeStrict("list_documents", undefined, () => MOCK_DOCUMENTS);
 }
 
 const MOCK_KNOWLEDGE_MESSAGES: KnowledgeMessageDTO[] = [
@@ -1099,7 +1131,7 @@ const MOCK_KNOWLEDGE_MESSAGES: KnowledgeMessageDTO[] = [
 let mockKnowledgeMessages = [...MOCK_KNOWLEDGE_MESSAGES];
 
 export function listKnowledgeMessages(threadId: string): Promise<KnowledgeMessageDTO[]> {
-  return safeInvoke(
+  return invokeStrict(
     "list_knowledge_messages",
     { threadId },
     () => mockKnowledgeMessages.filter((message) => message.thread_id === threadId)
@@ -1110,7 +1142,7 @@ export function createKnowledgeThread(
   scope: KnowledgeScope,
   meetingId?: string | null
 ): Promise<KnowledgeThreadDTO> {
-  return safeInvoke(
+  return invokeStrict(
     "create_knowledge_thread",
     { input: { scope, meeting_id: meetingId ?? null } },
     () => ({
@@ -1128,7 +1160,7 @@ export function sendKnowledgeMessage(
   threadId: string,
   content: string
 ): Promise<KnowledgeMessageDTO> {
-  return safeInvoke("send_knowledge_message", { threadId, content }, () => {
+  return invokeStrict("send_knowledge_message", { threadId, content }, () => {
     const assistant: KnowledgeMessageDTO = {
       id: "km-" + Date.now(),
       thread_id: threadId,
@@ -1188,7 +1220,7 @@ export function uploadDocument(
     binary += String.fromCharCode(...raw.subarray(index, index + chunkSize));
   }
   const contentBase64 = btoa(binary);
-  return safeInvoke(
+  return invokeStrict(
     "upload_document",
     {
       input: {
@@ -1221,7 +1253,7 @@ export function searchKnowledge(
   meetingId?: string | null,
   limit = 10
 ): Promise<KnowledgeSearchResultDTO[]> {
-  return safeInvoke(
+  return invokeStrict(
     "search_knowledge",
     { scope, meetingId: meetingId ?? null, query, limit },
     () => [
@@ -1243,24 +1275,26 @@ export function searchKnowledge(
 }
 
 export function getKnowledgeIndexStatus(): Promise<KnowledgeIndexStatusDTO> {
-  return safeInvoke("get_knowledge_index_status", undefined, () => ({
+  return invokeStrict("get_knowledge_index_status", undefined, () => ({
     generation_id: "mock-generation",
     embedding_model_id: "bge-small-en-v1.5",
     state: "active",
     ready_sources: 6,
     pending_sources: 0,
     error_sources: 0,
+    vector_backend: "unavailable",
   }));
 }
 
 export function indexKnowledgeSource(sourceId: string): Promise<KnowledgeIndexStatusDTO> {
-  return safeInvoke("index_knowledge_source", { sourceId }, () => ({
+  return invokeStrict("index_knowledge_source", { sourceId }, () => ({
     generation_id: "mock-generation",
     embedding_model_id: "bge-small-en-v1.5",
     state: "active",
     ready_sources: 6,
     pending_sources: 0,
     error_sources: 0,
+    vector_backend: "unavailable",
   }));
 }
 
@@ -1269,7 +1303,7 @@ export function retryKnowledgeIndex(sourceId: string): Promise<void> {
 }
 
 export function listEmbeddingModels(): Promise<EmbeddingModelDTO[]> {
-  return safeInvoke("list_embedding_models", undefined, () => [
+  return invokeStrict("list_embedding_models", undefined, () => [
     {
       id: "bge-small-en-v1.5",
       display_name: "BGE Small English v1.5",
@@ -1294,11 +1328,27 @@ export function configureProvider(
   destination: string,
   configured = true
 ): Promise<void> {
-  return safeInvoke("configure_provider", { provider, model, destination, configured });
+  return invokeStrict("configure_provider", { provider, model, destination, configured }, () => undefined);
 }
 
 export function saveProviderApiKey(provider: ProviderKind, apiKey: string): Promise<void> {
-  return safeInvoke("save_provider_api_key", { provider, apiKey });
+  return invokeStrict("save_provider_api_key", { provider, apiKey }, () => undefined);
+}
+
+/** The snapshot the user explicitly selected, or null when nothing is selected yet. */
+export async function getSelectedProvider(): Promise<ProviderSnapshotDTO | null> {
+  return invokeStrict(
+    "get_selected_provider",
+    undefined,
+    () => ({
+      provider: "llama_server" as ProviderKind,
+      model: "local",
+      destination: "http://127.0.0.1 (local, offline)",
+      selected_at: new Date().toISOString(),
+      disclosure: "Browser preview: no content leaves this machine.",
+    }),
+    (error) => (/no rows|not selected|not found/i.test(error.message) ? null : Promise.reject(error))
+  );
 }
 
 export function selectProvider(
@@ -1307,9 +1357,34 @@ export function selectProvider(
   destination: string,
   acceptDisclosure: boolean
 ): Promise<ProviderSnapshotDTO> {
-  return safeInvoke("select_provider", {
-    input: { provider, model, destination, accept_disclosure: acceptDisclosure },
-  });
+  // The user's click is the authorization; a swallowed failure would leave the
+  // previous provider in place while the UI claims the new one is active.
+  return invokeStrict(
+    "select_provider",
+    { input: { provider, model, destination, accept_disclosure: acceptDisclosure } },
+    () => ({
+      provider,
+      model,
+      destination,
+      selected_at: new Date().toISOString(),
+      disclosure: "Browser preview: no content leaves this machine.",
+    })
+  );
+}
+
+/** The llama.cpp runtime behind local summarization and chat, not whisper.cpp. */
+export async function getLlamaBackend(): Promise<LlamaRuntimeInfoDTO> {
+  return invokeStrict("get_llama_backend", undefined, () => ({
+    backend: "Cpu",
+    device_name: null,
+    device_index: null,
+    reason: "Browser preview has no native llama.cpp runtime.",
+    engine_source: "path" as const,
+    engine_path: "llama-server",
+    patched: false,
+    toshllm_tag: null,
+    llama_commit: null,
+  }));
 }
 
 export function listProviderConfigs(): Promise<ProviderConfigDTO[]> {
@@ -1317,7 +1392,9 @@ export function listProviderConfigs(): Promise<ProviderConfigDTO[]> {
 }
 
 export function triggerSummary(meetingId: string, regenerate = false): Promise<BackendSummaryRevisionDTO> {
-  return safeInvoke("trigger_summary", { meetingId, regenerate });
+  return invokeStrict("trigger_summary", { meetingId, regenerate }, () => {
+    throw new Error("Summary generation is unavailable in the browser preview.");
+  });
 }
 
 const asStringList = (value: unknown): string[] =>

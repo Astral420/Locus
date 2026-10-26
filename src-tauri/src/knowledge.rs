@@ -133,6 +133,9 @@ pub struct IndexStatusDto {
     pub ready_sources: i64,
     pub pending_sources: i64,
     pub error_sources: i64,
+    /// Which vector store the sidecar reported: `chromadb`, `deterministic-fallback`
+    /// (reduced quality) or `unknown` while the sidecar has not run yet.
+    pub vector_backend: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +242,9 @@ pub struct KnowledgeService {
     database: Database,
     sidecar: Arc<Mutex<SidecarManager>>,
     document_root: PathBuf,
+    /// Cached answer from the sidecar; ChromaDB availability cannot change while
+    /// the process runs, and a polled status must not ask every three seconds.
+    vector_backend: Arc<Mutex<Option<String>>>,
 }
 
 impl KnowledgeService {
@@ -251,7 +257,30 @@ impl KnowledgeService {
             database,
             sidecar,
             document_root: document_root.into(),
+            vector_backend: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// `chromadb`, `deterministic-fallback`, or `unknown` until the sidecar has run.
+    fn vector_backend(&self) -> String {
+        let Ok(mut cached) = self.vector_backend.lock() else {
+            return "unknown".into();
+        };
+        if cached.is_none() {
+            let reported = self
+                .sidecar
+                .lock()
+                .ok()
+                .and_then(|mut sidecar| sidecar.health_if_running())
+                .and_then(|health| {
+                    health
+                        .get("vector_store")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            *cached = reported;
+        }
+        cached.clone().unwrap_or_else(|| "unknown".into())
     }
 
     pub fn list_documents(&self) -> Result<Vec<DocumentDto>, String> {
@@ -652,6 +681,7 @@ impl KnowledgeService {
     }
 
     pub fn index_status(&self) -> Result<IndexStatusDto, String> {
+        let vector_backend = self.vector_backend();
         self.database
             .run(|connection| {
                 let generation: Option<(String, String, String)> = connection
@@ -670,6 +700,7 @@ impl KnowledgeService {
                         ready_sources: 0,
                         pending_sources: 0,
                         error_sources: 0,
+                        vector_backend,
                     });
                 };
                 let counts: (i64, i64, i64) = connection
@@ -686,6 +717,7 @@ impl KnowledgeService {
                     ready_sources: counts.0,
                     pending_sources: counts.1,
                     error_sources: counts.2,
+                    vector_backend: vector_backend.clone(),
                 })
             })
             .map_err(|error| error.to_string())
@@ -925,15 +957,28 @@ impl KnowledgeService {
             messages.push(ChatMessage::user(format!(
                 "Retrieved sources:\n{context}\n\nQuestion: {content_owned}\nAnswer with concise Markdown and cite sources as [S1], [S2], etc."
             )));
-            completion_provider
-                .complete(&ChatCompletionRequest {
-                    model: snapshot.model.clone(),
-                    messages,
-                    temperature: 0.1,
-                    max_tokens: Some(1200),
-                })
-                .map_err(|error| error.to_string())?
-                .content
+            // A failed completion is visible in the conversation, exactly like a
+            // failed search: the user must see why no answer arrived rather than
+            // an empty thread or a fabricated one.
+            match completion_provider.complete(&ChatCompletionRequest {
+                model: snapshot.model.clone(),
+                messages,
+                temperature: 0.1,
+                max_tokens: Some(1200),
+            }) {
+                Ok(response) => response.content,
+                Err(error) => {
+                    let _ = self.insert_message(
+                        &thread_id_owned,
+                        "assistant",
+                        &format!("I couldn't generate an answer: {error}"),
+                        &provider_identity,
+                        &snapshot.model,
+                        "error",
+                    );
+                    return Err(error.to_string());
+                }
+            }
         };
         let assistant_id = self.insert_message(
             &thread_id_owned,
@@ -1968,6 +2013,17 @@ mod tests {
         assert!(service
             .create_thread(KnowledgeScope::ThisMeeting, None)
             .is_err());
+    }
+
+    #[test]
+    fn index_status_never_starts_the_sidecar_to_describe_its_vector_store() {
+        let service = service();
+        let status = service.index_status().unwrap();
+        assert_eq!(status.state, "blocked");
+        // Nothing has been indexed, so no store has been chosen yet, and the poll
+        // must not spawn a process just to answer.
+        assert_eq!(status.vector_backend, "unknown");
+        assert_eq!(service.index_status().unwrap().vector_backend, "unknown");
     }
 
     #[test]

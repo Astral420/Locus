@@ -21,7 +21,7 @@ use super::{
 use crate::{
     contracts::CaptureLifecycle,
     db::Database,
-    llm::providers::build_provider,
+    llm::generation_server::build_runtime_provider,
     sidecar::{
         client::{SidecarClient, SidecarError},
         protocol::ProtocolError,
@@ -646,7 +646,7 @@ fn summarization(state: &AppState, job: &PipelineJob) -> StepOutcome {
         }
     };
     let keychain = crate::keychain::Keychain::new("com.locus.app");
-    let provider = match build_provider(&snapshot, &keychain) {
+    let provider = match build_runtime_provider(state, &snapshot, &keychain) {
         Ok(provider) => provider,
         Err(error) => return StepOutcome::Blocked(error.to_string()),
     };

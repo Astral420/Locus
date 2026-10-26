@@ -42,6 +42,9 @@ pub struct AppState {
     pub storage: storage::StorageService,
     pub pipeline: PipelineOrchestrator,
     pub embedding_server: Arc<Mutex<Option<Arc<llm::llama_cpp::LlamaServerManager>>>>,
+    /// The generation server, separate from embeddings so a switched chat model
+    /// never re-indexes and an embedding model never answers a question.
+    pub generation_server: Arc<Mutex<Option<Arc<llm::llama_cpp::LlamaServerManager>>>>,
 }
 
 /// Models root recorded by "move models" in Settings, if it still exists.
@@ -117,6 +120,7 @@ fn build_state(app: &tauri::AppHandle) -> Result<AppState, Box<dyn std::error::E
         storage,
         pipeline: PipelineOrchestrator::new(database.clone()),
         embedding_server: Arc::new(Mutex::new(None)),
+        generation_server: Arc::new(Mutex::new(None)),
         executor: pipeline::executor::PipelineExecutor::new(),
         paths,
         database,
@@ -190,6 +194,7 @@ pub fn run() {
             commands::model_uninstall::uninstall_model,
             commands::models::select_model,
             commands::models::get_gpu_backend,
+            commands::models::get_llama_backend,
             commands::storage::get_storage_info,
             commands::storage::migrate_models,
             commands::storage::relocate_storage,

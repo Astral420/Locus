@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { Header } from "../components/layout/Header";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -26,6 +27,8 @@ import { createThreadForFirstMessage, discardIfEmpty, KNOWLEDGE_SCOPE_LABELS, st
 import { useKnowledgeStore } from "../stores/knowledgeStore";
 
 const scopeLabels = KNOWLEDGE_SCOPE_LABELS;
+/** The one send failure the user can act on from here. */
+const NO_LOCAL_MODEL = /no local language model is selected/i;
 
 function citationLabel(citation: KnowledgeMessageDTO["citations"][number]): string {
   if (citation.page_number) return citation.source_title + " · page " + citation.page_number;
@@ -286,8 +289,22 @@ export const KnowledgeContent: React.FC = () => {
           </section>
 
           <form onSubmit={search} className="space-y-2"><label htmlFor="knowledge-search" className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Semantic search</label><div className="flex gap-1.5"><input id="knowledge-search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search by meaning…" className="min-w-0 flex-1 h-8 px-3 rounded-full bg-bg text-xs text-ink focus-visible:ring-2 focus-visible:ring-accent" /><Button variant="secondary" size="sm" type="submit" aria-label="Run semantic search"><Search className="w-3.5 h-3.5" /></Button></div>{searchResults.length > 0 && <div className="space-y-1.5" aria-label="Semantic search results">{searchResults.map((result) => <button key={result.chunk_id} type="button" className="w-full text-left p-2.5 rounded-lg bg-bg text-[11px] hover:bg-surface-hover"><span className="block font-semibold text-primary">{result.source_title}</span><span className="line-clamp-2 text-ink-muted">{result.text}</span></button>)}</div>}</form>
-          {error && <p role="alert" className="text-[11px] text-status-error">{error}</p>}
+          {error && (
+            <p role="alert" className="text-[11px] text-status-error">
+              {error}{" "}
+              {NO_LOCAL_MODEL.test(error) && (
+                <Link to="/models" className="font-medium text-primary underline">
+                  Download a language model
+                </Link>
+              )}
+            </p>
+          )}
           <div className="mt-auto p-2.5 rounded-xl bg-bg flex items-center justify-between text-xs"><span className="text-ink-muted font-medium">Vector index</span><span className={"flex items-center gap-1 font-semibold text-[11px] " + (indexStatus?.state === "blocked" ? "text-status-warning" : "text-green-text")}>{indexStatus?.state === "blocked" ? <LoaderCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5 text-primary" />}{indexStatus?.state === "blocked" ? "Model needed" : indexStatus?.pending_sources ? "Indexing" : "Ready"}</span></div>
+          {indexStatus?.vector_backend === "deterministic-fallback" && (
+            <p role="status" className="p-2.5 rounded-xl bg-bg text-[11px] text-status-warning">
+              ChromaDB is not installed; search quality and speed are reduced. Run scripts/setup-sidecar.sh.
+            </p>
+          )}
         </aside>
 
         <main className="md:col-span-8 xl:col-span-9 flex flex-col min-h-0">

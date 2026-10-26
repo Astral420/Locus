@@ -5,10 +5,10 @@ use crate::{
     },
     llm::{
         backend::{detect_llama_backend, LlamaBackend},
-        engine::resolve_llama_server,
+        engine::resolved_engine,
+        generation_server::build_runtime_provider,
         llama_cpp::{LlamaServerConfig, LlamaServerManager},
         model_manager::{EmbeddingModelCatalogEntry, EmbeddingModelManager},
-        providers::build_provider,
     },
     AppState,
 };
@@ -16,10 +16,10 @@ use base64::Engine;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
-use tauri::State;
+use tauri::{Manager, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateKnowledgeThreadInput {
@@ -147,26 +147,37 @@ pub fn search_knowledge(
     )
 }
 
+/// Answers a Knowledge question with the explicitly selected provider. Off the
+/// UI thread because the first local generation launch can take minutes.
 #[tauri::command]
-pub fn send_knowledge_message(
-    state: State<'_, AppState>,
+pub async fn send_knowledge_message(
+    app: tauri::AppHandle,
     thread_id: String,
     content: String,
 ) -> Result<KnowledgeMessageDto, String> {
-    let embedding = embedding_provider(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        answer_knowledge_message(&app.state::<AppState>(), &thread_id, &content)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn answer_knowledge_message(
+    state: &AppState,
+    thread_id: &str,
+    content: &str,
+) -> Result<KnowledgeMessageDto, String> {
+    let embedding = embedding_provider(state)?;
     let snapshot = state
         .providers
         .snapshot()
         .map_err(|error| error.to_string())?;
     let keychain = crate::keychain::Keychain::new("com.locus.app");
-    let completion = build_provider(&snapshot, &keychain).map_err(|error| error.to_string())?;
-    state.knowledge.send_message(
-        &thread_id,
-        &content,
-        &snapshot,
-        &embedding,
-        completion.as_ref(),
-    )
+    let completion =
+        build_runtime_provider(state, &snapshot, &keychain).map_err(|error| error.to_string())?;
+    state
+        .knowledge
+        .send_message(thread_id, content, &snapshot, &embedding, completion.as_ref())
 }
 
 #[tauri::command]
@@ -299,9 +310,10 @@ pub fn select_embedding_model(
 }
 
 pub(crate) fn embedding_provider(state: &AppState) -> Result<LlamaEmbeddingProvider, String> {
-    let binary = resolve_llama_server().binary;
+    // The engine and the backend decision each log once, from their own module;
+    // repeating it here made every request print a third, duplicate line.
+    let binary = resolved_engine().binary.clone();
     let choice = detect_llama_backend();
-    eprintln!("llama backend: {:?} ({})", choice.backend, choice.reason);
     embedding_provider_with(
         &state.embedding_models,
         &state.embedding_server,
@@ -310,24 +322,11 @@ pub(crate) fn embedding_provider(state: &AppState) -> Result<LlamaEmbeddingProvi
     )
 }
 
-/// Whether the currently running embedding server may serve the wanted model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EmbeddingServerPlan {
-    Reuse,
-    Relaunch,
-}
-
-/// A running server is only reused when it was launched with the wanted model
-/// path and still answers health checks; every other state relaunches it.
-pub(crate) fn plan_embedding_server(
-    current: Option<(Option<&Path>, bool)>,
-    wanted: &Path,
-) -> EmbeddingServerPlan {
-    match current {
-        Some((Some(path), true)) if path == wanted => EmbeddingServerPlan::Reuse,
-        _ => EmbeddingServerPlan::Relaunch,
-    }
-}
+/// The embedding role uses the same reuse/relaunch rule as generation. The
+/// names are kept so the existing plan tests and call sites stay unchanged.
+pub(crate) use crate::llm::llama_cpp::{
+    plan_server as plan_embedding_server, ServerPlan as EmbeddingServerPlan,
+};
 
 /// Resolve the embedding provider against the managed assets and the shared
 /// server slot. The slot is validated against the selected model on every

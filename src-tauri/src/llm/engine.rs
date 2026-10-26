@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 const MANIFEST_NAME: &str = "engine.json";
@@ -54,31 +55,79 @@ impl ResolvedEngine {
     }
 }
 
-/// Finds the engine, preferring an explicit override, then the app bundle and a
-/// source checkout, then `PATH`. Never panics; when nothing exists it returns
-/// the bare name so the caller keeps the previous behavior.
-pub fn resolve_llama_server() -> ResolvedEngine {
-    let env_override = std::env::var_os("LOCUS_LLAMA_SERVER_BIN").map(std::path::PathBuf::from);
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    let cwd_candidates = [PathBuf::from("src-tauri")
-        .join(ENGINE_DIR)
-        .join(LLAMA_SERVER_NAME)];
-    let path_var = std::env::var_os("PATH");
+/// Every directory that can hold the engine in a source checkout, most specific
+/// first. `packaging/llama-engine/dist/` is where `stage.sh` puts the built
+/// engine, and it is the only copy a developer has before staging.
+fn checkout_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from(ENGINE_DIR).join(LLAMA_SERVER_NAME),
+        PathBuf::from("src-tauri")
+            .join(ENGINE_DIR)
+            .join(LLAMA_SERVER_NAME),
+    ];
+    // `current_dir()` under `tauri dev` is `src-tauri/`, so neither of the two
+    // above resolves there. Absolute paths from the build environment do.
+    #[cfg(debug_assertions)]
+    {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        candidates.push(manifest_dir.join(ENGINE_DIR).join(LLAMA_SERVER_NAME));
+        candidates.push(
+            manifest_dir
+                .join("../packaging")
+                .join(ENGINE_DIR)
+                .join("dist")
+                .join(LLAMA_SERVER_NAME),
+        );
+    }
+    candidates
+}
 
-    let resolved = resolve_with(env_override, exe_dir.as_deref(), &cwd_candidates, path_var);
-    eprintln!(
-        "locus: llama-server source={:?} binary={}{}",
-        resolved.source,
-        resolved.binary.display(),
-        if resolved.manifest.is_some() {
-            " (patched engine)"
-        } else {
-            ""
+/// The one answer to "which llama-server, and is it patched" for this process.
+/// Resolving once keeps the log to a single line even though the embedding and
+/// generation servers and the backend probe all ask.
+pub fn resolved_engine() -> &'static ResolvedEngine {
+    static ENGINE: OnceLock<ResolvedEngine> = OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let env_override = std::env::var_os("LOCUS_LLAMA_SERVER_BIN").map(PathBuf::from);
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf));
+        let cwd_candidates = checkout_candidates();
+        let path_var = std::env::var_os("PATH");
+
+        let resolved = resolve_with(env_override, exe_dir.as_deref(), &cwd_candidates, path_var);
+        eprintln!(
+            "locus: llama-server source={:?} binary={}{}",
+            resolved.source,
+            resolved.binary.display(),
+            if resolved.manifest.is_some() {
+                " (patched engine)"
+            } else {
+                ""
+            }
+        );
+        // A stock `PATH` binary is the case users report as "no AMD Metal
+        // support"; say where we looked so the fix is obvious.
+        if resolved.source == EngineSource::Path && resolved.manifest.is_none() {
+            let cwd = std::env::current_dir()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"));
+            let tried = cwd_candidates
+                .iter()
+                .map(|candidate| candidate.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "locus: llama-server has no engine.json; current_dir={cwd} checkout candidates tried=[{tried}]"
+            );
         }
-    );
-    resolved
+        resolved
+    })
+}
+
+/// Convenience wrapper for callers that only need the binary once.
+pub fn resolve_llama_server() -> ResolvedEngine {
+    resolved_engine().clone()
 }
 
 /// Pure resolution core. `exe_dir` is the running executable's directory,
@@ -159,6 +208,30 @@ mod tests {
 
     fn path_var(dir: &Path) -> OsString {
         std::env::join_paths([dir]).unwrap()
+    }
+
+    #[test]
+    fn checkout_candidates_cover_the_dev_directory_and_the_packaging_drop() {
+        let candidates = checkout_candidates();
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(ENGINE_DIR).join(LLAMA_SERVER_NAME)
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from("src-tauri")
+                .join(ENGINE_DIR)
+                .join(LLAMA_SERVER_NAME)
+        );
+        // `tauri dev` runs with cwd `src-tauri/`, so the two relative candidates
+        // never match there; the build-time absolutes are what find the engine.
+        #[cfg(debug_assertions)]
+        {
+            assert!(candidates.iter().any(|candidate| candidate
+                .ends_with(Path::new("packaging/llama-engine/dist/llama-server"))));
+            assert!(candidates.iter().any(|candidate| candidate
+                .starts_with(env!("CARGO_MANIFEST_DIR"))));
+        }
     }
 
     #[test]
