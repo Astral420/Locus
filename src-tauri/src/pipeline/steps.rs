@@ -635,6 +635,9 @@ fn ocr(state: &AppState, job: &PipelineJob) -> StepOutcome {
 // ---------------------------------------------------------------------------
 
 fn summarization(state: &AppState, job: &PipelineJob) -> StepOutcome {
+    // Generation is one blocking call today, so mark the step as running before
+    // the first token rather than leaving progress at 0% for minutes.
+    let _ = state.pipeline.set_progress(&job.id, 0.01);
     // Never choose a destination for the user: without an explicit selection
     // the step waits rather than falling back to any provider.
     let snapshot = match state.providers.snapshot() {
