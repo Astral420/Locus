@@ -251,6 +251,8 @@ pub struct LlamaServerManager {
     base_url: String,
     auth_token: String,
     model: Option<PathBuf>,
+    /// Read-only source for the log tail quoted when the child dies.
+    log_path: Option<PathBuf>,
     /// Per-request allowance for generation. The client itself has no total
     /// timeout; health and embedding requests set their own short ones.
     generation_timeout: Duration,
@@ -328,6 +330,7 @@ impl LlamaServerManager {
             base_url: format!("http://{}:{port}", config.host),
             auth_token,
             model: config.model_path,
+            log_path: config.log_path.clone(),
             generation_timeout: GENERATION_REQUEST_TIMEOUT,
         };
         let deadline = Instant::now() + startup_timeout;
@@ -377,7 +380,7 @@ impl LlamaServerManager {
             .bearer_auth(&self.auth_token)
             .timeout(HEALTH_CHECK_TIMEOUT)
             .send()
-            .map_err(|error| LlmError::Request(error.to_string()))?;
+            .map_err(|error| LlmError::Request(describe_request_error(&error)))?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -396,7 +399,7 @@ impl LlamaServerManager {
             .timeout(self.generation_timeout)
             .json(&serde_json::json!({"prompt": prompt, "n_predict": 4096, "temperature": 0.1, "model": model}))
             .send()
-            .map_err(|error| LlmError::Request(error.to_string()))?;
+            .map_err(|error| self.request_failure(&error))?;
         let parsed: CompletionResponse = parse_json(response)?;
         Ok(parsed.content)
     }
@@ -409,9 +412,63 @@ impl LlamaServerManager {
             .timeout(EMBEDDING_REQUEST_TIMEOUT)
             .json(&serde_json::json!({"content": input, "model": model}))
             .send()
-            .map_err(|error| LlmError::Request(error.to_string()))?;
+            .map_err(|error| LlmError::Request(describe_request_error(&error)))?;
         let parsed: EmbeddingResponse = parse_json(response)?;
         parsed.into_embedding()
+    }
+
+    /// Reads the child's exit status, giving a just-crashed process a moment to
+    /// be reaped before the error is built.
+    fn wait_for_child_exit(
+        &self,
+        grace: Duration,
+    ) -> Result<Option<std::process::ExitStatus>, LlmError> {
+        let deadline = Instant::now() + grace;
+        loop {
+            let status = self
+                .child
+                .lock()
+                .map_err(|_| LlmError::Request("llama-server process lock poisoned".into()))?
+                .try_wait()
+                .map_err(|error| LlmError::Request(error.to_string()))?;
+            if status.is_some() || Instant::now() >= deadline {
+                return Ok(status);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Classifies a failed send and, when the child is gone, says so with the
+    /// exit status and the engine log tail instead of only the generic reqwest
+    /// "error sending request" text.
+    fn request_failure(&self, error: &reqwest::Error) -> LlmError {
+        let description = describe_request_error(error);
+        match self.wait_for_child_exit(Duration::from_millis(300)) {
+            Ok(Some(status)) => {
+                let mut message = format!(
+                    "the local language model stopped unexpectedly ({})",
+                    describe_exit_status(status)
+                );
+                message.push_str(&log_tail(self.log_path.as_deref()));
+                LlmError::Request(message)
+            }
+            Ok(None) => {
+                let hint = match self.log_path.as_deref() {
+                    Some(path) => format!(
+                        "The model server is still running; the request may have been too slow or too large. See {}.",
+                        path.display()
+                    ),
+                    None => "The model server is still running; the request may have been too slow or too large.".into(),
+                };
+                LlmError::Request(format!("{description}. {hint}"))
+            }
+            Err(error) => LlmError::Request(format!("{description}. {error}")),
+        }
+    }
+
+    #[cfg(test)]
+    fn set_generation_timeout(&mut self, timeout: Duration) {
+        self.generation_timeout = timeout;
     }
 
     pub fn shutdown(&self) -> Result<(), LlmError> {
@@ -482,7 +539,7 @@ impl CompletionProvider for LlamaServerManager {
                 "stream": false,
             }))
             .send()
-            .map_err(|error| LlmError::Request(error.to_string()))?;
+            .map_err(|error| self.request_failure(&error))?;
         let parsed: ChatCompletionsResponse = parse_json(response)?;
         parsed.into_response(request.model.clone())
     }
@@ -580,6 +637,43 @@ fn open_log(path: &Option<PathBuf>) -> Result<Option<std::fs::File>, LlmError> {
                 path.display()
             ))
         })
+}
+
+/// Classifies a failed send and keeps the cause chain reqwest hides behind its
+/// "error sending request for url (...)" message.
+fn describe_request_error(error: &reqwest::Error) -> String {
+    let mut causes = Vec::new();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !causes.iter().any(|existing| existing == &text) {
+            causes.push(text);
+        }
+        source = cause.source();
+    }
+    let classification = if error.is_timeout() {
+        "timed out"
+    } else if error.is_connect() {
+        "could not connect"
+    } else if error.is_body() || error.is_decode() {
+        "connection closed while reading the response"
+    } else {
+        "connection closed"
+    };
+    let mut message = format!("{classification}: {error}");
+    if !causes.is_empty() {
+        message.push_str(" (");
+        message.push_str(&causes.join(": "));
+        message.push(')');
+    }
+    message
+}
+
+fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit status: {code}"),
+        None => status.to_string(),
+    }
 }
 
 /// The last lines of the engine log, for a startup failure the user can read.
@@ -988,6 +1082,108 @@ sys.exit(1)
 "##;
 
     #[cfg(unix)]
+    const FAKE_SERVER_THAT_DELAYS: &str = r##"#!/usr/bin/env python3
+import json
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+args = sys.argv[1:]
+port = 0
+index = 0
+while index < len(args):
+    if args[index] == "--port" and index + 1 < len(args):
+        port = int(args[index + 1])
+        index += 2
+    else:
+        index += 1
+
+print("fake llama-server device: AMD Radeon RX 6600", file=sys.stderr, flush=True)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def _reply(self, status, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._reply(200, {"status": "ok"})
+        else:
+            self._reply(404, {})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length:
+            self.rfile.read(length)
+        if self.path == "/v1/chat/completions":
+            time.sleep(1.0)
+            self._reply(200, {"model": "local", "choices": [{"message": {"content": "late"}}]})
+        else:
+            self._reply(404, {})
+
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+"##;
+
+    #[cfg(unix)]
+    const FAKE_SERVER_THAT_CRASHES_MID_REQUEST: &str = r##"#!/usr/bin/env python3
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+args = sys.argv[1:]
+port = 0
+index = 0
+while index < len(args):
+    if args[index] == "--port" and index + 1 < len(args):
+        port = int(args[index + 1])
+        index += 2
+    else:
+        index += 1
+
+print("fake llama-server device: AMD Radeon RX 6600", file=sys.stderr, flush=True)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/health":
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length:
+            self.rfile.read(length)
+        if self.path == "/v1/chat/completions":
+            print("ggml_metal: error: command buffer failed", file=sys.stderr, flush=True)
+            os._exit(9)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+"##;
+
+    #[cfg(unix)]
     fn python3_available() -> bool {
         std::process::Command::new("python3")
             .arg("--version")
@@ -1141,6 +1337,85 @@ sys.exit(1)
         // The bearer token is passed as an argument, so it must never be in the log.
         assert!(!logged.contains("--api-key"), "{logged:?}");
         assert_eq!(logged.matches("error:").count(), 2, "{logged:?}");
+    }
+
+    #[test]
+    fn generation_requests_have_no_thirty_second_cap() {
+        // reqwest's blocking client defaults to a 30 s total request timeout,
+        // which aborted real summaries. Generation keeps a named allowance that
+        // is far above it; tests shorten it per manager.
+        assert_ne!(GENERATION_REQUEST_TIMEOUT, Duration::from_secs(30));
+        assert!(GENERATION_REQUEST_TIMEOUT >= Duration::from_secs(30 * 60));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_generation_is_reported_as_timed_out_with_the_log_path() {
+        if !python3_available() {
+            eprintln!("skipping timeout test: python3 is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_named_executable_script(
+            dir.path(),
+            "slow-server.py",
+            FAKE_SERVER_THAT_DELAYS,
+        );
+        let log_path = dir.path().join("logs/llama-generation.log");
+        let mut config = config_for_fake_server(&binary);
+        config.log_path = Some(log_path.clone());
+        let mut manager = LlamaServerManager::launch(config).unwrap();
+        // The fake server answers after one second; a 150 ms allowance makes
+        // the classification testable without waiting for the real ceiling.
+        manager.set_generation_timeout(Duration::from_millis(150));
+
+        let error = manager
+            .complete(&ChatCompletionRequest {
+                model: "local".into(),
+                messages: vec![crate::llm::ChatMessage::user("hello")],
+                temperature: 0.1,
+                max_tokens: Some(16),
+            })
+            .expect_err("the delayed answer must exceed the test allowance")
+            .to_string();
+
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains(&log_path.display().to_string()), "{error}");
+        assert!(error.contains("still running"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_server_that_dies_mid_request_reports_its_exit_status_and_log_tail() {
+        if !python3_available() {
+            eprintln!("skipping crash test: python3 is not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_named_executable_script(
+            dir.path(),
+            "crashing-server.py",
+            FAKE_SERVER_THAT_CRASHES_MID_REQUEST,
+        );
+        let log_path = dir.path().join("logs/llama-generation.log");
+        let mut config = config_for_fake_server(&binary);
+        config.log_path = Some(log_path.clone());
+        let manager = LlamaServerManager::launch(config).unwrap();
+
+        let error = manager
+            .complete(&ChatCompletionRequest {
+                model: "local".into(),
+                messages: vec![crate::llm::ChatMessage::user("hello")],
+                temperature: 0.1,
+                max_tokens: Some(16),
+            })
+            .expect_err("a crashed server cannot answer")
+            .to_string();
+
+        assert!(error.contains("stopped unexpectedly"), "{error}");
+        assert!(error.contains("exit status: 9"), "{error}");
+        assert!(error.contains(&log_path.display().to_string()), "{error}");
+        assert!(error.contains("command buffer failed"), "{error}");
     }
 
     #[test]
