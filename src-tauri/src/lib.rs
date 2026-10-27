@@ -106,7 +106,12 @@ fn build_state(app: &tauri::AppHandle) -> Result<AppState, Box<dyn std::error::E
         media_root: paths.media.clone(),
         transcription: transcription::TranscriptionService::new(database.clone()),
         providers: llm::providers::ProviderSelectionService::new(database.clone()),
-        summarization: llm::summarization::SummarizationService::new(database.clone()),
+        summarization: llm::summarization::SummarizationService::new(database.clone())
+            .with_failure_sink(Arc::new(
+                llm::summarization::FileSummaryFailureSink::new(
+                    paths.data_dir.join("logs").join("summary-failures"),
+                ),
+            )),
         knowledge: knowledge::KnowledgeService::new(
             database.clone(),
             Arc::clone(&sidecar),

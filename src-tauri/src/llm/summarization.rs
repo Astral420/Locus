@@ -1,13 +1,18 @@
 use super::{
     prompts::{PromptKind, PromptRouter},
     providers::ProviderSnapshot,
-    ChatCompletionRequest, ChatMessage, CompletionProvider, LlmError,
+    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionProvider, LlmError,
 };
 use crate::{contracts::MeetingType, db::Database};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use uuid::Uuid;
 
 /// Prompt sizes are counted in characters because that is how the transcript is
@@ -29,6 +34,12 @@ const INTERMEDIATE_MAX_TOKENS: u32 = 700;
 const MAX_FOLD_PASSES: usize = 4;
 /// Tokens reserved for a summary completion.
 const SUMMARY_MAX_TOKENS: u32 = 4_096;
+/// How many raw-output diagnostic files are kept in the summary-failures folder.
+const SUMMARY_FAILURE_LIMIT: usize = 5;
+/// Upper bound on a diagnostic file so a runaway model cannot fill the disk.
+const SUMMARY_FAILURE_MAX_BYTES: usize = 64 * 1024;
+/// Opt-in capture of raw output for summaries that parsed successfully.
+const ENV_SUMMARY_DEBUG: &str = "LOCUS_SUMMARY_DEBUG";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Citation {
@@ -68,6 +79,156 @@ pub struct GeneratedSummary {
     pub citations: Vec<Citation>,
     #[serde(default)]
     pub disclosures: Vec<String>,
+}
+
+/// Everything a diagnostic file needs to explain a failed summary. The raw
+/// model output is stored locally only; nothing here crosses a network boundary.
+#[derive(Debug, Clone)]
+pub struct FailureRecord {
+    pub timestamp: String,
+    pub meeting_id: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt_identity: String,
+    pub max_tokens: u32,
+    pub completion_tokens: Option<u64>,
+    pub message: String,
+    pub raw: String,
+}
+
+impl FailureRecord {
+    fn truncated_at_max_tokens(&self) -> bool {
+        self.completion_tokens
+            .is_some_and(|tokens| tokens >= u64::from(self.max_tokens))
+    }
+}
+
+/// Injected sink for local diagnostic files. Implementations must never panic
+/// and must ignore their own I/O errors so the original summary error survives.
+pub trait SummaryFailureSink: Send + Sync {
+    fn record(&self, record: &FailureRecord) -> Option<PathBuf>;
+}
+
+pub struct NoopSummaryFailureSink;
+
+impl SummaryFailureSink for NoopSummaryFailureSink {
+    fn record(&self, _record: &FailureRecord) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// Writes one plain-text file per record into a dedicated folder, keeping only
+/// the newest [`SUMMARY_FAILURE_LIMIT`] files.
+pub struct FileSummaryFailureSink {
+    directory: PathBuf,
+}
+
+impl FileSummaryFailureSink {
+    pub fn new(directory: PathBuf) -> Self {
+        Self { directory }
+    }
+}
+
+impl SummaryFailureSink for FileSummaryFailureSink {
+    fn record(&self, record: &FailureRecord) -> Option<PathBuf> {
+        if fs::create_dir_all(&self.directory).is_err() {
+            return None;
+        }
+        let stem = format!(
+            "{}-{}",
+            sanitize_file_component(&record.timestamp),
+            sanitize_file_component(&record.meeting_id)
+        );
+        let path = unique_path(&self.directory, &stem);
+        let mut content = render_failure_record(record);
+        if content.len() > SUMMARY_FAILURE_MAX_BYTES {
+            let end = floor_char_boundary(&content, SUMMARY_FAILURE_MAX_BYTES);
+            content.truncate(end);
+        }
+        fs::write(&path, content).ok()?;
+        prune_old_failures(&self.directory, SUMMARY_FAILURE_LIMIT);
+        Some(path)
+    }
+}
+
+fn render_failure_record(record: &FailureRecord) -> String {
+    let mut text = format!(
+        "timestamp: {}\nmeeting id: {}\nprovider: {}\nmodel: {}\nprompt: {}\nmax_tokens: {}\n",
+        record.timestamp,
+        record.meeting_id,
+        record.provider,
+        record.model,
+        record.prompt_identity,
+        record.max_tokens,
+    );
+    if let Some(tokens) = record.completion_tokens {
+        text.push_str(&format!("completion_tokens: {tokens}\n"));
+    }
+    if record.truncated_at_max_tokens() {
+        text.push_str("WARNING: output may have been truncated at max_tokens\n");
+    }
+    text.push_str(&format!(
+        "error: {}\n\n----- raw model output -----\n{}",
+        record.message, record.raw
+    ));
+    text
+}
+
+fn sanitize_file_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".into()
+    } else {
+        sanitized
+    }
+}
+
+fn unique_path(directory: &Path, stem: &str) -> PathBuf {
+    let mut candidate = directory.join(format!("{stem}.txt"));
+    let mut index = 1;
+    while candidate.exists() {
+        candidate = directory.join(format!("{stem}-{index}.txt"));
+        index += 1;
+    }
+    candidate
+}
+
+fn prune_old_failures(directory: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .collect();
+    files.sort();
+    if files.len() > keep {
+        for path in &files[..files.len() - keep] {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn debug_capture_enabled() -> bool {
+    std::env::var(ENV_SUMMARY_DEBUG).as_deref() == Ok("1")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,11 +297,20 @@ struct SummaryContext {
 #[derive(Clone)]
 pub struct SummarizationService {
     database: Database,
+    failure_sink: Arc<dyn SummaryFailureSink>,
 }
 
 impl SummarizationService {
     pub fn new(database: Database) -> Self {
-        Self { database }
+        Self {
+            database,
+            failure_sink: Arc::new(NoopSummaryFailureSink),
+        }
+    }
+
+    pub fn with_failure_sink(mut self, sink: Arc<dyn SummaryFailureSink>) -> Self {
+        self.failure_sink = sink;
+        self
     }
 
     /// Generate and publish a summary using an explicitly selected provider.
@@ -188,7 +358,7 @@ impl SummarizationService {
             &context.requested_type,
         );
         let job_id = self.start_job(meeting_id, snapshot, &route, &context)?;
-        let result = self.generate_payload(provider, snapshot, &route, &context);
+        let result = self.generate_payload(meeting_id, provider, snapshot, &route, &context);
         let payload = match result {
             Ok(payload) => payload,
             Err(error) => {
@@ -449,6 +619,7 @@ impl SummarizationService {
 
     fn generate_payload(
         &self,
+        meeting_id: &str,
         provider: &dyn CompletionProvider,
         snapshot: &ProviderSnapshot,
         route: &super::prompts::PromptRoute,
@@ -515,7 +686,70 @@ impl SummarizationService {
             }
             self.complete(provider, snapshot, route.kind, &notes, &slide_text)?
         };
-        parse_generated_summary(&response)
+        match parse_generated_summary(&response.content) {
+            Ok(payload) => {
+                if debug_capture_enabled() {
+                    self.record_summary_output(
+                        meeting_id,
+                        snapshot,
+                        route,
+                        &response,
+                        &response.content,
+                        "summary parsed successfully",
+                    );
+                }
+                Ok(payload)
+            }
+            Err(error) => {
+                let saved = self.record_summary_output(
+                    meeting_id,
+                    snapshot,
+                    route,
+                    &response,
+                    &error.raw,
+                    &error.message,
+                );
+                match &saved {
+                    Some(path) => eprintln!("locus: summary parse failed ({})", path.display()),
+                    None => eprintln!(
+                        "locus: summary parse failed ({})",
+                        error.path.as_deref().unwrap_or("unknown field")
+                    ),
+                }
+                let message = match saved {
+                    Some(path) => format!(
+                        "{} Raw model output saved to {}.",
+                        error.message,
+                        path.display()
+                    ),
+                    None => error.message,
+                };
+                Err(LlmError::InvalidResponse(message))
+            }
+        }
+    }
+
+    fn record_summary_output(
+        &self,
+        meeting_id: &str,
+        snapshot: &ProviderSnapshot,
+        route: &super::prompts::PromptRoute,
+        response: &ChatCompletionResponse,
+        raw: &str,
+        message: &str,
+    ) -> Option<PathBuf> {
+        let record = FailureRecord {
+            timestamp: Utc::now().to_rfc3339(),
+            meeting_id: meeting_id.to_owned(),
+            provider: snapshot.provider.as_str().to_owned(),
+            model: snapshot.model.clone(),
+            prompt_identity: route.kind.as_str().to_owned(),
+            max_tokens: SUMMARY_MAX_TOKENS,
+            completion_tokens: response.completion_tokens,
+            message: message.to_owned(),
+            raw: raw.to_owned(),
+        };
+        self.failure_sink.record(&record)
     }
 
     fn complete(
@@ -525,18 +759,16 @@ impl SummarizationService {
         kind: PromptKind,
         transcript: &str,
         slide_text: &str,
-    ) -> Result<String, LlmError> {
-        provider
-            .complete(&ChatCompletionRequest {
-                model: snapshot.model.clone(),
-                messages: vec![
-                    ChatMessage::system(PromptRouter::system_prompt(kind)),
-                    ChatMessage::user(PromptRouter::user_prompt(kind, transcript, slide_text)),
-                ],
-                temperature: 0.1,
-                max_tokens: Some(SUMMARY_MAX_TOKENS),
-            })
-            .map(|response| response.content)
+    ) -> Result<ChatCompletionResponse, LlmError> {
+        provider.complete(&ChatCompletionRequest {
+            model: snapshot.model.clone(),
+            messages: vec![
+                ChatMessage::system(PromptRouter::system_prompt(kind)),
+                ChatMessage::user(PromptRouter::user_prompt(kind, transcript, slide_text)),
+            ],
+            temperature: 0.1,
+            max_tokens: Some(SUMMARY_MAX_TOKENS),
+        })
     }
 
     fn publish_empty(
@@ -813,7 +1045,15 @@ fn char_chunks(text: &str, limit: usize) -> Vec<&str> {
     chunks
 }
 
-fn parse_generated_summary(content: &str) -> Result<GeneratedSummary, LlmError> {
+#[derive(Debug)]
+struct SummaryParseError {
+    message: String,
+    path: Option<String>,
+    raw: String,
+}
+
+fn parse_generated_summary(content: &str) -> Result<GeneratedSummary, SummaryParseError> {
+    let raw = content.to_owned();
     let trimmed = content.trim();
     let json = trimmed
         .strip_prefix("```json")
@@ -825,15 +1065,27 @@ fn parse_generated_summary(content: &str) -> Result<GeneratedSummary, LlmError> 
         })
         .unwrap_or(trimmed)
         .trim();
-    let start = json
-        .find('{')
-        .ok_or_else(|| LlmError::InvalidResponse("summary is not JSON".into()))?;
-    let end = json
-        .rfind('}')
-        .ok_or_else(|| LlmError::InvalidResponse("summary is not JSON".into()))?;
-    serde_json::from_str(&json[start..=end]).map_err(|error| {
-        LlmError::InvalidResponse(format!("summary schema validation failed: {error}"))
-    })
+    let not_json = || SummaryParseError {
+        message: "summary is not JSON".into(),
+        path: None,
+        raw: raw.clone(),
+    };
+    let start = json.find('{').ok_or_else(not_json)?;
+    let end = json.rfind('}').ok_or_else(not_json)?;
+    let mut deserializer = serde_json::Deserializer::from_str(&json[start..=end]);
+    match serde_path_to_error::deserialize::<_, GeneratedSummary>(&mut deserializer) {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            let path = error.path().to_string();
+            let path = (!path.is_empty() && path != ".").then_some(path);
+            let detail = error.into_inner();
+            let message = match &path {
+                Some(path) => format!("summary schema validation failed at {path}: {detail}"),
+                None => format!("summary schema validation failed: {detail}"),
+            };
+            Err(SummaryParseError { message, path, raw })
+        }
+    }
 }
 
 fn clean_title(title: &str) -> Option<String> {
@@ -1188,5 +1440,205 @@ mod tests {
             })
             .unwrap();
         assert_eq!(title, "Chosen by user");
+    }
+
+    fn invalid_summary_output() -> String {
+        serde_json::json!({
+            "title": "Sprint delivery",
+            "overview": "The team agreed on a sprint delivery date.",
+            "decisions": ["Ship by Friday"],
+            "action_items": [],
+            "citations": [],
+            "key_concepts": [{"term": "sprint", "definition": "a fixed delivery window"}],
+            "assignments": [],
+            "important_dates": [],
+            "disclosures": []
+        })
+        .to_string()
+    }
+
+    #[derive(Default)]
+    struct CapturingSink {
+        records: std::sync::Mutex<Vec<FailureRecord>>,
+    }
+
+    impl SummaryFailureSink for CapturingSink {
+        fn record(&self, record: &FailureRecord) -> Option<PathBuf> {
+            self.records.lock().unwrap().push(record.clone());
+            Some(PathBuf::from("/tmp/locus-summary-diagnostic.txt"))
+        }
+    }
+
+    #[test]
+    fn a_parse_failure_names_the_field_and_records_the_raw_output() {
+        let db = fixture_db();
+        let sink = Arc::new(CapturingSink::default());
+        let service = SummarizationService::new(db).with_failure_sink(sink.clone());
+        let output = invalid_summary_output();
+        let fake = FakeProvider {
+            response: output.clone(),
+        };
+
+        let error = service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap_err();
+
+        assert!(
+            error.contains("key_concepts[0]"),
+            "the error must name the failing field: {error}"
+        );
+        assert!(error.contains("Raw model output saved to"));
+        let records = sink.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].raw, output);
+        assert_eq!(records[0].meeting_id, "m");
+        assert!(records[0].completion_tokens.is_none());
+    }
+
+    fn record_with(timestamp: &str, raw: &str) -> FailureRecord {
+        FailureRecord {
+            timestamp: timestamp.into(),
+            meeting_id: "m".into(),
+            provider: "llama_server".into(),
+            model: "local-test".into(),
+            prompt_identity: "generic".into(),
+            max_tokens: SUMMARY_MAX_TOKENS,
+            completion_tokens: None,
+            message: "summary schema validation failed".into(),
+            raw: raw.into(),
+        }
+    }
+
+    fn failure_files(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn only_the_newest_five_failure_files_are_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let sink = FileSummaryFailureSink::new(root.path().to_path_buf());
+        for index in 0..7 {
+            let timestamp = format!("20260101T00000{index}Z");
+            sink.record(&record_with(&timestamp, "raw output"));
+        }
+
+        let names = failure_files(root.path());
+        assert_eq!(names.len(), 5);
+        for index in 2..7 {
+            assert!(
+                names.contains(&format!("20260101T00000{index}Z-m.txt")),
+                "missing newest file {index}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_content_is_truncated_at_64_kib() {
+        let root = tempfile::tempdir().unwrap();
+        let sink = FileSummaryFailureSink::new(root.path().to_path_buf());
+        let path = sink
+            .record(&record_with("20260101T000000Z", &"a".repeat(70_000)))
+            .unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.len() <= SUMMARY_FAILURE_MAX_BYTES);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("----- raw model output -----"));
+    }
+
+    #[test]
+    fn an_unwritable_failure_directory_leaves_the_original_error_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let blocker = root.path().join("not-a-directory");
+        fs::write(&blocker, b"x").unwrap();
+        let sink = Arc::new(FileSummaryFailureSink::new(
+            blocker.join("summary-failures"),
+        ));
+        let db = fixture_db();
+        let service = SummarizationService::new(db).with_failure_sink(sink);
+        let fake = FakeProvider {
+            response: invalid_summary_output(),
+        };
+
+        let error = service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap_err();
+
+        assert!(error.contains("summary schema validation failed at key_concepts[0]"));
+        assert!(!error.contains("Raw model output saved"));
+    }
+
+    struct TokenProvider {
+        response: String,
+        completion_tokens: u64,
+    }
+
+    impl CompletionProvider for TokenProvider {
+        fn complete(
+            &self,
+            _request: &ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, LlmError> {
+            Ok(ChatCompletionResponse {
+                content: self.response.clone(),
+                model: Some("fake".into()),
+                prompt_tokens: None,
+                completion_tokens: Some(self.completion_tokens),
+            })
+        }
+    }
+
+    #[test]
+    fn a_completion_at_the_token_limit_is_flagged_in_the_diagnostic_file() {
+        let root = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FileSummaryFailureSink::new(root.path().to_path_buf()));
+        let db = fixture_db();
+        let service = SummarizationService::new(db).with_failure_sink(sink);
+        let fake = TokenProvider {
+            response: invalid_summary_output(),
+            completion_tokens: u64::from(SUMMARY_MAX_TOKENS),
+        };
+
+        service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap_err();
+
+        let names = failure_files(root.path());
+        assert_eq!(names.len(), 1);
+        let text = fs::read_to_string(root.path().join(&names[0])).unwrap();
+        assert!(text.contains("completion_tokens: 4096"));
+        assert!(text.contains("WARNING: output may have been truncated at max_tokens"));
+    }
+
+    #[test]
+    fn a_successful_summary_writes_nothing_unless_debug_capture_is_enabled() {
+        std::env::remove_var(ENV_SUMMARY_DEBUG);
+        let root = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FileSummaryFailureSink::new(root.path().to_path_buf()));
+        let db = fixture_db();
+        let service = SummarizationService::new(db).with_failure_sink(sink);
+        let fake = FakeProvider {
+            response: serde_json::json!({
+                "title": "Sprint delivery",
+                "overview": "The team agreed on a sprint delivery date.",
+                "decisions": ["Ship by Friday"],
+                "action_items": [],
+                "citations": [],
+                "key_concepts": [], "assignments": [], "important_dates": [], "disclosures": []
+            })
+            .to_string(),
+        };
+
+        let revision = service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap();
+
+        assert_eq!(revision.revision, 1);
+        assert!(!root.path().exists() || failure_files(root.path()).is_empty());
     }
 }
