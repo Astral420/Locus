@@ -74,7 +74,7 @@ System prompt character lengths (bound `2_400`):
 
 - Base SHA: `8ea14cdc519a6e666485041475aab024f2ae09cf`.
 - `dev` had moved from the analysis SHA `7913982` to `8ea14cd` before work started. Re-read the current files; no rebase was needed afterwards because `origin/dev` did not move during the task.
-- Implementation commit SHA: recorded in the follow-up docs commit that finalizes this ledger.
+- Implementation commit SHA: `2fed5252a078a0f720760f26ccd80cd962a382c3`.
 - Final branch tip: the docs commit that records the implementation SHA.
 
 ### Files changed per phase
