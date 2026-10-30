@@ -405,6 +405,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                 messages: vec![ChatMessage::user("hello")],
                 temperature: 0.1,
                 max_tokens: Some(64),
+                response_format: None,
             })
             .unwrap()
             .content
@@ -483,6 +484,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             messages: vec![ChatMessage::user("hello")],
             temperature: 0.1,
             max_tokens: Some(64),
+            response_format: None,
         };
 
         let provider = generation_server_with(

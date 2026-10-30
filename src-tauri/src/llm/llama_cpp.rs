@@ -1,6 +1,6 @@
 use super::{
     backend::LlamaBackend, parse_json, ChatCompletionRequest, ChatCompletionResponse,
-    CompletionProvider, LlmError,
+    CompletionProvider, LlmError, ResponseFormat,
 };
 use crate::transcription::{detect_backend, vulkan_environment, BackendKind};
 use reqwest::blocking::Client;
@@ -466,6 +466,16 @@ impl LlamaServerManager {
         }
     }
 
+    fn post_chat(&self, body: &serde_json::Value) -> Result<reqwest::blocking::Response, LlmError> {
+        self.client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .bearer_auth(&self.auth_token)
+            .timeout(self.generation_timeout)
+            .json(body)
+            .send()
+            .map_err(|error| self.request_failure(&error))
+    }
+
     #[cfg(test)]
     fn set_generation_timeout(&mut self, timeout: Duration) {
         self.generation_timeout = timeout;
@@ -518,28 +528,70 @@ impl LlamaServerManager {
     }
 }
 
+/// 400 and 422 are how a llama-server build that does not understand
+/// `response_format` (or cannot convert a schema) refuses the field. Only those
+/// two statuses are retried; timeouts and crashes never are.
+fn rejects_response_format(status: u16) -> bool {
+    matches!(status, 400 | 422)
+}
+
+/// The chat-completions body. `response_format` is only present when the caller
+/// asked for a constrained shape, so free-text callers send exactly the fields
+/// they always did.
+fn chat_request_body(request: &ChatCompletionRequest) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": request.model,
+        "messages": request.messages,
+        "temperature": request.temperature,
+        "max_tokens": request.max_tokens,
+        "stream": false,
+    });
+    if let Some(ResponseFormat::JsonSchema { name, schema }) = &request.response_format {
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "response_format".into(),
+                serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": name,
+                        // OpenAI-compatible shape; llama-server reads `schema`.
+                        "strict": true,
+                        "schema": schema,
+                    },
+                }),
+            );
+        }
+    }
+    body
+}
+
 impl CompletionProvider for LlamaServerManager {
     /// `/v1/chat/completions` so the engine applies the model's own chat
     /// template, and so `temperature`/`max_tokens` reach the sampler instead of
     /// being replaced by fixed values.
+    ///
+    /// A schema travels as `response_format`, which llama.cpp turns into a
+    /// grammar. If that request is rejected, it is retried once without the
+    /// schema so an older engine still answers; the prompt and the tolerant
+    /// parser remain the safety net in that path.
     fn complete(
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, LlmError> {
-        let response = self
-            .client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .bearer_auth(&self.auth_token)
-            .timeout(self.generation_timeout)
-            .json(&serde_json::json!({
-                "model": request.model,
-                "messages": request.messages,
-                "temperature": request.temperature,
-                "max_tokens": request.max_tokens,
-                "stream": false,
-            }))
-            .send()
-            .map_err(|error| self.request_failure(&error))?;
+        let body = chat_request_body(request);
+        let response = self.post_chat(&body)?;
+        let response = if request.response_format.is_some()
+            && rejects_response_format(response.status().as_u16())
+        {
+            eprintln!("locus: llama-server rejected response_format; retrying without schema");
+            let mut plain = body.clone();
+            if let Some(object) = plain.as_object_mut() {
+                object.remove("response_format");
+            }
+            self.post_chat(&plain)?
+        } else {
+            response
+        };
         let parsed: ChatCompletionsResponse = parse_json(response)?;
         parsed.into_response(request.model.clone())
     }
@@ -1277,6 +1329,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                 ],
                 temperature: 0.25,
                 max_tokens: Some(256),
+                response_format: None,
             })
             .unwrap();
 
@@ -1375,6 +1428,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                 messages: vec![crate::llm::ChatMessage::user("hello")],
                 temperature: 0.1,
                 max_tokens: Some(16),
+                response_format: None,
             })
             .expect_err("the delayed answer must exceed the test allowance")
             .to_string();
@@ -1408,6 +1462,7 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                 messages: vec![crate::llm::ChatMessage::user("hello")],
                 temperature: 0.1,
                 max_tokens: Some(16),
+                response_format: None,
             })
             .expect_err("a crashed server cannot answer")
             .to_string();
@@ -1483,5 +1538,200 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             .environment
             .iter()
             .any(|(key, _value)| key == "GGML_VK_VISIBLE_DEVICES"));
+    }
+
+    fn schema_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "local".into(),
+            messages: vec![crate::llm::ChatMessage::user("hello")],
+            temperature: 0.1,
+            max_tokens: Some(64),
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "meeting_summary".into(),
+                schema: serde_json::json!({"type": "object"}),
+            }),
+        }
+    }
+
+    #[test]
+    fn the_request_body_carries_response_format_only_when_asked() {
+        let body = chat_request_body(&schema_request());
+        let format = &body["response_format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["json_schema"]["name"], "meeting_summary");
+        assert_eq!(format["json_schema"]["strict"], true);
+        assert_eq!(
+            format["json_schema"]["schema"],
+            serde_json::json!({"type": "object"})
+        );
+        // The fields that were already sent are untouched.
+        assert_eq!(body["temperature"], serde_json::json!(0.1f32));
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["stream"], false);
+
+        let mut plain = schema_request();
+        plain.response_format = None;
+        let body = chat_request_body(&plain);
+        assert!(
+            body.get("response_format").is_none(),
+            "a free-text request must not mention response_format"
+        );
+    }
+
+    #[test]
+    fn only_client_errors_are_treated_as_a_rejected_schema() {
+        assert!(rejects_response_format(400));
+        assert!(rejects_response_format(422));
+        for status in [200, 401, 403, 404, 429, 500, 503] {
+            assert!(
+                !rejects_response_format(status),
+                "{status} must not trigger a retry"
+            );
+        }
+    }
+
+    /// Records every chat request body to `__LOG__` and, with `__REJECT__`, answers
+    /// 400 to any request that carries `response_format`.
+    #[cfg(unix)]
+    const FAKE_SERVER_THAT_RECORDS_RESPONSE_FORMAT: &str = r##"#!/usr/bin/env python3
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+LOG = "__LOG__"
+REJECT = __REJECT__
+
+args = sys.argv[1:]
+port = 0
+index = 0
+while index < len(args):
+    if args[index] == "--port" and index + 1 < len(args):
+        port = int(args[index + 1])
+        index += 2
+    else:
+        index += 1
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def _reply(self, status, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._reply(200, {"status": "ok"})
+        else:
+            self._reply(404, {})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        if self.path != "/v1/chat/completions":
+            self._reply(404, {})
+            return
+        with open(LOG, "a", encoding="utf-8") as handle:
+            handle.write(raw.decode("utf-8") + "\n")
+        request = json.loads(raw.decode("utf-8") or "{}")
+        if REJECT and "response_format" in request:
+            self._reply(400, {"error": {"message": "unsupported field response_format"}})
+            return
+        self._reply(
+            200,
+            {
+                "model": request.get("model", ""),
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 2},
+            },
+        )
+
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+"##;
+
+    #[cfg(unix)]
+    fn recording_server(reject_schema: bool) -> (tempfile::TempDir, LlamaServerManager, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("requests.jsonl");
+        let contents = FAKE_SERVER_THAT_RECORDS_RESPONSE_FORMAT
+            .replace("__LOG__", &log.display().to_string())
+            .replace("__REJECT__", if reject_schema { "1" } else { "0" });
+        let binary = write_named_executable_script(dir.path(), "recording-server.py", &contents);
+        let manager = LlamaServerManager::launch(config_for_fake_server(&binary)).unwrap();
+        (dir, manager, log)
+    }
+
+    #[cfg(unix)]
+    fn recorded_requests(log: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("the fake server records real JSON"))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_schema_request_sends_response_format_and_a_plain_one_does_not() {
+        if !python3_available() {
+            eprintln!("skipping response_format wire test: python3 is not available");
+            return;
+        }
+        let (_dir, manager, log) = recording_server(false);
+
+        let mut plain = schema_request();
+        plain.response_format = None;
+        manager.complete(&plain).unwrap();
+        manager.complete(&schema_request()).unwrap();
+
+        let requests = recorded_requests(&log);
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].get("response_format").is_none(),
+            "a plain request must not send the key: {}",
+            requests[0]
+        );
+        let format = &requests[1]["response_format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["json_schema"]["name"], "meeting_summary");
+        assert_eq!(
+            format["json_schema"]["schema"],
+            serde_json::json!({"type": "object"})
+        );
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rejected_response_format_is_retried_exactly_once_without_it() {
+        if !python3_available() {
+            eprintln!("skipping response_format retry test: python3 is not available");
+            return;
+        }
+        let (_dir, manager, log) = recording_server(true);
+
+        let response = manager
+            .complete(&schema_request())
+            .expect("the retry without a schema must still answer");
+        assert_eq!(response.content, "ok");
+
+        let requests = recorded_requests(&log);
+        assert_eq!(
+            requests.len(),
+            2,
+            "exactly one retry, got {}",
+            requests.len()
+        );
+        assert!(requests[0].get("response_format").is_some());
+        assert!(requests[1].get("response_format").is_none());
+        assert_eq!(requests[1]["messages"], requests[0]["messages"]);
+        manager.shutdown().unwrap();
     }
 }

@@ -960,12 +960,9 @@ impl KnowledgeService {
             // A failed completion is visible in the conversation, exactly like a
             // failed search: the user must see why no answer arrived rather than
             // an empty thread or a fabricated one.
-            match completion_provider.complete(&ChatCompletionRequest {
-                model: snapshot.model.clone(),
-                messages,
-                temperature: 0.1,
-                max_tokens: Some(1200),
-            }) {
+            match completion_provider
+                .complete(&knowledge_chat_request(snapshot.model.clone(), messages))
+            {
                 Ok(response) => response.content,
                 Err(error) => {
                     let _ = self.insert_message(
@@ -1512,6 +1509,18 @@ fn validate_active_meeting(
     }
 }
 
+/// The Knowledge chat request. Answers are prose, so no `response_format` is
+/// sent: constrained decoding belongs to summaries, whose shape the app parses.
+fn knowledge_chat_request(model: String, messages: Vec<ChatMessage>) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model,
+        messages,
+        temperature: 0.1,
+        max_tokens: Some(1200),
+        response_format: None,
+    }
+}
+
 fn chunk_pages(pages: &[ExtractedPage]) -> Vec<SourceChunkInput> {
     let mut chunks = Vec::new();
     for page in pages {
@@ -1932,6 +1941,14 @@ mod tests {
         assert!(extract_pdf(b"%PDF-1.7 /Encrypt").is_err());
         let image_only = b"%PDF-1.7 1 0 obj /Type /Page endobj";
         assert!(extract_pdf(image_only).is_err());
+    }
+
+    #[test]
+    fn knowledge_chat_requests_are_not_schema_constrained() {
+        let request = knowledge_chat_request("local".into(), vec![ChatMessage::user("hi")]);
+        assert!(request.response_format.is_none());
+        assert_eq!(request.temperature, 0.1);
+        assert_eq!(request.max_tokens, Some(1200));
     }
 
     #[test]

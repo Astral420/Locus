@@ -69,6 +69,8 @@ impl CompletionProvider for AnthropicClient {
                 }));
             }
         }
+        // `request.response_format` is deliberately not forwarded yet; the
+        // native mechanism to wire later is tool use with an `input_schema`.
         let body = serde_json::json!({
             "model": if request.model.is_empty() { &self.default_model } else { &request.model },
             "max_tokens": request.max_tokens.unwrap_or(4096),

@@ -2,6 +2,7 @@ use super::{
     prompts::{PromptKind, PromptRouter},
     providers::ProviderSnapshot,
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionProvider, LlmError,
+    ResponseFormat,
 };
 use crate::{contracts::MeetingType, db::Database};
 use chrono::Utc;
@@ -79,6 +80,87 @@ pub struct GeneratedSummary {
     pub citations: Vec<Citation>,
     #[serde(default)]
     pub disclosures: Vec<String>,
+}
+
+/// JSON Schema for [`GeneratedSummary`], sent with the final summary request so
+/// a local `llama-server` compiles it into a grammar and cannot emit a summary
+/// of the wrong shape. It mirrors the struct exactly: the five list fields are
+/// arrays of **strings**, the two structured lists are arrays of objects with
+/// every key required, and no object accepts extra keys.
+///
+/// Kept deliberately plain (no `$ref`, no `not`, no `if/then`, no pattern
+/// properties) because it has to convert cleanly through llama.cpp's
+/// `json-schema-to-grammar`. Every property is listed in `required` so the
+/// generated grammar has one fixed shape; an empty array or `null` is still a
+/// valid value for every field.
+pub fn summary_json_schema() -> Value {
+    let nullable_string = serde_json::json!({ "type": ["string", "null"] });
+    let string_list = serde_json::json!({
+        "type": "array",
+        "items": { "type": "string" },
+    });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "title": nullable_string,
+            "overview": { "type": "string" },
+            "action_items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string" },
+                        "assignee_speaker_id": nullable_string,
+                        "assignee": nullable_string,
+                        "deadline_phrase": nullable_string,
+                        "normalized_deadline": nullable_string,
+                        "evidence_refs": { "type": "array", "items": { "type": "string" } },
+                    },
+                    "required": [
+                        "text",
+                        "assignee_speaker_id",
+                        "assignee",
+                        "deadline_phrase",
+                        "normalized_deadline",
+                        "evidence_refs",
+                    ],
+                    "additionalProperties": false,
+                },
+            },
+            "decisions": string_list,
+            "key_concepts": string_list,
+            "assignments": string_list,
+            "important_dates": string_list,
+            "citations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string" },
+                        "ref_id": { "type": "string" },
+                        "start_seconds": { "type": ["number", "null"] },
+                        "end_seconds": { "type": ["number", "null"] },
+                        "page_number": { "type": ["integer", "null"] },
+                    },
+                    "required": ["kind", "ref_id", "start_seconds", "end_seconds", "page_number"],
+                    "additionalProperties": false,
+                },
+            },
+            "disclosures": string_list,
+        },
+        "required": [
+            "title",
+            "overview",
+            "action_items",
+            "decisions",
+            "key_concepts",
+            "assignments",
+            "important_dates",
+            "citations",
+            "disclosures",
+        ],
+        "additionalProperties": false,
+    })
 }
 
 /// Everything a diagnostic file needs to explain a failed summary. The raw
@@ -658,6 +740,7 @@ impl SummarizationService {
                 ],
                 temperature: 0.1,
                 max_tokens: Some(INTERMEDIATE_MAX_TOKENS),
+                response_format: None,
             };
             provider.complete(&request).map(|response| response.content)
         };
@@ -782,6 +865,12 @@ impl SummarizationService {
             ],
             temperature: 0.1,
             max_tokens: Some(SUMMARY_MAX_TOKENS),
+            // The final summary is the one call whose shape the app depends on.
+            // Folding passes stay free text.
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "meeting_summary".into(),
+                schema: summary_json_schema(),
+            }),
         })
     }
 
@@ -2241,5 +2330,224 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("unknown source"), "{error}");
+    }
+
+    /// Records the response format of every pass, so the constrained final call
+    /// can be told apart from the free-text folding calls.
+    struct FormatCaptureProvider {
+        summary: String,
+        formats: std::sync::Mutex<Vec<Option<ResponseFormat>>>,
+    }
+
+    impl FormatCaptureProvider {
+        fn new(summary: &str) -> Self {
+            Self {
+                summary: summary.to_owned(),
+                formats: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn formats(&self) -> Vec<Option<ResponseFormat>> {
+            self.formats.lock().unwrap().clone()
+        }
+    }
+
+    impl CompletionProvider for FormatCaptureProvider {
+        fn complete(
+            &self,
+            request: &ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, LlmError> {
+            self.formats
+                .lock()
+                .unwrap()
+                .push(request.response_format.clone());
+            let is_fold = request.messages.iter().any(|message| {
+                message
+                    .content
+                    .starts_with("Summarize this sequential transcript passage")
+            });
+            Ok(ChatCompletionResponse {
+                content: if is_fold {
+                    "note: the team agreed on a sprint date. ".repeat(4)
+                } else {
+                    self.summary.clone()
+                },
+                model: Some("fake".into()),
+                prompt_tokens: None,
+                completion_tokens: None,
+            })
+        }
+    }
+
+    fn plain_summary_json() -> String {
+        serde_json::json!({
+            "title": "Sprint delivery",
+            "overview": "The team agreed on a sprint delivery date.",
+            "decisions": ["Ship by Friday"],
+            "action_items": [],
+            "citations": [],
+            "key_concepts": [], "assignments": [], "important_dates": [], "disclosures": []
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_summary_request_carries_the_schema() {
+        let db = fixture_db();
+        let service = SummarizationService::new(db);
+        let provider = FormatCaptureProvider::new(&plain_summary_json());
+
+        service
+            .summarize_with_provider("m", &snapshot(), &provider, false)
+            .unwrap();
+
+        let formats = provider.formats();
+        assert_eq!(formats.len(), 1, "a short transcript needs one pass");
+        match &formats[0] {
+            Some(ResponseFormat::JsonSchema { name, schema }) => {
+                assert_eq!(name, "meeting_summary");
+                assert_eq!(schema, &summary_json_schema());
+            }
+            other => panic!("the summary request must carry the schema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn folding_passes_stay_free_text_and_only_the_final_pass_is_constrained() {
+        let db = fixture_db();
+        let long = "The team agreed to ship the sprint by Friday. ".repeat(1_100);
+        db.run(move |connection| {
+            connection
+                .execute(
+                    "UPDATE transcript_segments SET text=?1 WHERE id='seg1'",
+                    [&long],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        let service = SummarizationService::new(db);
+        let provider = FormatCaptureProvider::new(&plain_summary_json());
+
+        service
+            .summarize_with_provider("m", &snapshot(), &provider, false)
+            .unwrap();
+
+        let formats = provider.formats();
+        assert!(formats.len() > 1, "a long transcript must be folded first");
+        let (last, folds) = formats.split_last().unwrap();
+        assert!(
+            folds.iter().all(Option::is_none),
+            "folding notes are free text and must not be constrained"
+        );
+        assert!(matches!(last, Some(ResponseFormat::JsonSchema { .. })));
+    }
+
+    fn complete_summary_sample() -> GeneratedSummary {
+        GeneratedSummary {
+            title: Some("Sprint delivery".into()),
+            overview: "The team agreed the sprint scope and the delivery date.".into(),
+            action_items: vec![GeneratedActionItem {
+                text: "Send the report".into(),
+                assignee_speaker_id: Some("sp1".into()),
+                assignee: Some("Ana".into()),
+                deadline_phrase: Some("Friday".into()),
+                normalized_deadline: None,
+                evidence_refs: vec![Value::String("seg1".into())],
+            }],
+            decisions: vec!["Ship the report by Friday".into()],
+            key_concepts: vec!["Idempotency: repeating a call has the same effect".into()],
+            assignments: vec!["Ana owns the report".into()],
+            important_dates: vec!["2026-11-03: project demo".into()],
+            citations: vec![Citation {
+                kind: "transcript".into(),
+                ref_id: "seg1".into(),
+                start_seconds: Some(0.0),
+                end_seconds: Some(2.5),
+                page_number: None,
+            }],
+            disclosures: vec!["Some slides were unavailable.".into()],
+        }
+    }
+
+    /// Manual helper: prints the schema the summary request sends, so it can be
+    /// fed to the pinned engine's `json-schema-to-grammar` when checking that a
+    /// schema change still converts.
+    ///   cargo test print_summary_schema -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn print_summary_schema() {
+        println!(
+            "SUMMARY_SCHEMA:{}",
+            serde_json::to_string(&summary_json_schema()).unwrap()
+        );
+    }
+
+    fn summary_validator() -> jsonschema::Validator {
+        jsonschema::validator_for(&summary_json_schema())
+            .expect("the summary schema must be a valid JSON Schema")
+    }
+
+    #[test]
+    fn the_schema_accepts_a_full_and_a_quiet_summary() {
+        let validator = summary_validator();
+        let full = serde_json::to_value(complete_summary_sample()).unwrap();
+        let errors = validator
+            .iter_errors(&full)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "the schema must accept a real summary: {errors:?}"
+        );
+
+        // A meeting with no decisions still has every key, with empty lists.
+        let quiet = serde_json::to_value(GeneratedSummary {
+            title: None,
+            overview: "No speech was detected in this recording.".into(),
+            action_items: Vec::new(),
+            decisions: Vec::new(),
+            key_concepts: Vec::new(),
+            assignments: Vec::new(),
+            important_dates: Vec::new(),
+            citations: Vec::new(),
+            disclosures: vec!["The transcript contains no speech segments.".into()],
+        })
+        .unwrap();
+        assert!(validator.is_valid(&quiet));
+    }
+
+    #[test]
+    fn the_schema_rejects_the_structured_lists_from_the_bug_report() {
+        let validator = summary_validator();
+        let sample = serde_json::to_value(complete_summary_sample()).unwrap();
+
+        // The reported failure: an object where a plain string belongs.
+        let mut value = sample.clone();
+        value["key_concepts"] = serde_json::json!([
+            {"term": "Idempotency", "definition": "repeating a call has the same effect"}
+        ]);
+        assert!(
+            !validator.is_valid(&value),
+            "an object inside key_concepts must be rejected"
+        );
+
+        // Every string list has the same rule, and so does a nested list.
+        for field in ["decisions", "assignments", "important_dates", "disclosures"] {
+            let mut value = sample.clone();
+            value[field] = serde_json::json!([{"date": "2026-11-03", "event": "demo"}]);
+            assert!(
+                !validator.is_valid(&value),
+                "an object inside {field} must be rejected"
+            );
+        }
+        let mut value = sample.clone();
+        value["action_items"][0]["evidence_refs"] = serde_json::json!([{"id": "seg1"}]);
+        assert!(!validator.is_valid(&value));
+
+        // The grammar always emits every key, so a missing key is invalid too.
+        let mut value = sample;
+        value.as_object_mut().unwrap().remove("disclosures");
+        assert!(!validator.is_valid(&value));
     }
 }
