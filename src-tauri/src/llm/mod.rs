@@ -90,12 +90,30 @@ impl ChatMessage {
     }
 }
 
+/// A provider-native way to constrain the shape of the completion.
+///
+/// Only the local `llama-server` provider honours this today: it forwards the
+/// schema as `response_format`, which the engine compiles into a GBNF grammar
+/// and uses to constrain token sampling. Other providers ignore the field for
+/// now; each of them has a native equivalent noted at its request body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: f32,
     pub max_tokens: Option<u32>,
+    /// `None` keeps the provider's free-text behaviour exactly as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

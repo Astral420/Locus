@@ -51,4 +51,5 @@ screencapturekit = { version = "10.0.3", default-features = false, features = ["
 whisper-rs = { version = "0.16", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
+jsonschema = "0.60.2"
 tempfile = "3"

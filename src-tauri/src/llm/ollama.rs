@@ -91,6 +91,8 @@ impl CompletionProvider for OllamaClient {
         } else {
             &request.model
         };
+        // `request.response_format` is deliberately not forwarded yet; the
+        // native mechanism to wire later is the `format` field.
         let response = self
             .client
             .post(format!("{}/api/chat", self.endpoint))

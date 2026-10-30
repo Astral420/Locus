@@ -56,6 +56,8 @@ impl CompletionProvider for OpenAiClient {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, LlmError> {
+        // `request.response_format` is deliberately not forwarded yet; the
+        // native mechanism to wire later is `response_format: json_schema`.
         let body = serde_json::json!({
             "model": if request.model.is_empty() { &self.default_model } else { &request.model },
             "messages": request.messages,

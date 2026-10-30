@@ -77,6 +77,8 @@ impl CompletionProvider for GeminiClient {
             .iter()
             .find(|message| message.role == "system")
             .map(|message| serde_json::json!({"parts": [{"text": message.content}]}));
+        // `request.response_format` is deliberately not forwarded yet; the
+        // native mechanism to wire later is `generationConfig.responseSchema`.
         let body = serde_json::json!({
             "systemInstruction": system_instruction,
             "contents": contents,
