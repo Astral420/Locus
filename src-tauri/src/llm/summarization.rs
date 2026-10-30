@@ -651,7 +651,7 @@ impl SummarizationService {
             let request = ChatCompletionRequest {
                 model: snapshot.model.clone(),
                 messages: vec![
-                    ChatMessage::system(PromptRouter::system_prompt(route.kind)),
+                    ChatMessage::system(PromptRouter::folding_system_prompt()),
                     ChatMessage::user(format!(
                         "Summarize this sequential transcript passage into concise evidence-preserving notes. Keep action items, decisions, people, dates, and source IDs. Do not omit content because later passages may depend on it.\n\n{passage}"
                     )),
@@ -743,7 +743,7 @@ impl SummarizationService {
             meeting_id: meeting_id.to_owned(),
             provider: snapshot.provider.as_str().to_owned(),
             model: snapshot.model.clone(),
-            prompt_identity: route.kind.as_str().to_owned(),
+            prompt_identity: route.kind.identity().to_owned(),
             max_tokens: SUMMARY_MAX_TOKENS,
             completion_tokens: response.completion_tokens,
             message: message.to_owned(),
@@ -843,7 +843,7 @@ impl SummarizationService {
             "revision_id": context.transcript_revision_id,
         }]);
         let model_identity = format!("{}:{}", snapshot.provider.as_str(), snapshot.model);
-        let prompt_identity = kind.as_str().to_owned();
+        let prompt_identity = kind.identity().to_owned();
         self.database
             .run(move |connection| {
                 let current_revision: Option<String> = connection
