@@ -687,15 +687,29 @@ impl SummarizationService {
             self.complete(provider, snapshot, route.kind, &notes, &slide_text)?
         };
         match parse_generated_summary(&response.content) {
-            Ok(payload) => {
+            Ok((mut payload, report)) => {
+                if !report.is_empty() {
+                    payload
+                        .disclosures
+                        .push(normalization_disclosure(&report).to_owned());
+                    eprintln!("locus: summary normalized: {}", report.description());
+                }
                 if debug_capture_enabled() {
+                    let message = if report.is_empty() {
+                        "summary parsed successfully".to_owned()
+                    } else {
+                        format!(
+                            "summary parsed successfully; normalized: {}",
+                            report.description()
+                        )
+                    };
                     self.record_summary_output(
                         meeting_id,
                         snapshot,
                         route,
                         &response,
                         &response.content,
-                        "summary parsed successfully",
+                        &message,
                     );
                 }
                 Ok(payload)
@@ -1045,6 +1059,55 @@ fn char_chunks(text: &str, limit: usize) -> Vec<&str> {
     chunks
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NormalizationReport {
+    /// JSON paths whose value was rewritten into the expected shape.
+    pub flattened: Vec<String>,
+    /// Number of list entries that could not be recovered and were removed.
+    pub dropped: usize,
+}
+
+impl NormalizationReport {
+    fn is_empty(&self) -> bool {
+        self.flattened.is_empty() && self.dropped == 0
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "{}, dropped {}",
+            if self.flattened.is_empty() {
+                "nothing".to_owned()
+            } else {
+                self.flattened.join(", ")
+            },
+            self.dropped
+        )
+    }
+}
+
+const REFORMATTED_DISCLOSURE: &str =
+    "Some summary items were reformatted because the model returned structured entries.";
+const REFORMATTED_AND_DROPPED_DISCLOSURE: &str = "Some summary items were reformatted because the model returned structured entries and some invalid entries were dropped.";
+const PRIMARY_OBJECT_KEYS: &[&str] = &[
+    "name", "term", "concept", "title", "date", "decision", "task",
+];
+const SECONDARY_OBJECT_KEYS: &[&str] = &[
+    "definition",
+    "description",
+    "explanation",
+    "event",
+    "details",
+    "rationale",
+];
+
+fn normalization_disclosure(report: &NormalizationReport) -> &'static str {
+    if report.dropped > 0 {
+        REFORMATTED_AND_DROPPED_DISCLOSURE
+    } else {
+        REFORMATTED_DISCLOSURE
+    }
+}
+
 #[derive(Debug)]
 struct SummaryParseError {
     message: String,
@@ -1052,7 +1115,9 @@ struct SummaryParseError {
     raw: String,
 }
 
-fn parse_generated_summary(content: &str) -> Result<GeneratedSummary, SummaryParseError> {
+fn parse_generated_summary(
+    content: &str,
+) -> Result<(GeneratedSummary, NormalizationReport), SummaryParseError> {
     let raw = content.to_owned();
     let trimmed = content.trim();
     let json = trimmed
@@ -1072,9 +1137,16 @@ fn parse_generated_summary(content: &str) -> Result<GeneratedSummary, SummaryPar
     };
     let start = json.find('{').ok_or_else(not_json)?;
     let end = json.rfind('}').ok_or_else(not_json)?;
-    let mut deserializer = serde_json::Deserializer::from_str(&json[start..=end]);
-    match serde_path_to_error::deserialize::<_, GeneratedSummary>(&mut deserializer) {
-        Ok(summary) => Ok(summary),
+    let mut value: Value =
+        serde_json::from_str(&json[start..=end]).map_err(|detail| SummaryParseError {
+            message: format!("summary is not valid JSON: {detail}"),
+            path: None,
+            raw: raw.clone(),
+        })?;
+    let mut report = NormalizationReport::default();
+    normalize_summary_value(&mut value, &mut report);
+    match serde_path_to_error::deserialize::<_, GeneratedSummary>(value) {
+        Ok(summary) => Ok((summary, report)),
         Err(error) => {
             let path = error.path().to_string();
             let path = (!path.is_empty() && path != ".").then_some(path);
@@ -1086,6 +1158,288 @@ fn parse_generated_summary(content: &str) -> Result<GeneratedSummary, SummaryPar
             Err(SummaryParseError { message, path, raw })
         }
     }
+}
+
+fn normalize_summary_value(value: &mut Value, report: &mut NormalizationReport) {
+    let Value::Object(object) = value else {
+        return;
+    };
+    normalize_overview(object.get_mut("overview"), report);
+    for field in [
+        "decisions",
+        "key_concepts",
+        "assignments",
+        "important_dates",
+        "disclosures",
+    ] {
+        normalize_string_list(object.get_mut(field), field, report);
+    }
+    normalize_action_items(object.get_mut("action_items"), report);
+    normalize_citations(object.get_mut("citations"), report);
+    normalize_optional_string(object.get_mut("title"), "title", report);
+}
+
+/// Render a JSON value as text without losing the order of object keys. The
+/// crate is built with `serde_json`'s `preserve_order`, so an object keeps the
+/// model's original key order instead of sorting alphabetically.
+fn flatten_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().filter_map(flatten_value).collect();
+            (!parts.is_empty()).then(|| parts.join("; "))
+        }
+        Value::Object(object) => flatten_object(object),
+    }
+}
+
+fn flatten_object(object: &serde_json::Map<String, Value>) -> Option<String> {
+    let find = |keys: &[&str]| {
+        object.iter().find(|(key, _)| {
+            let key = key.to_ascii_lowercase();
+            keys.contains(&key.as_str())
+        })
+    };
+    if let (Some((_, primary)), Some((_, secondary))) =
+        (find(PRIMARY_OBJECT_KEYS), find(SECONDARY_OBJECT_KEYS))
+    {
+        if let (Some(primary), Some(secondary)) = (flatten_value(primary), flatten_value(secondary))
+        {
+            return Some(format!("{primary}: {secondary}"));
+        }
+    }
+    let parts: Vec<String> = object.values().filter_map(flatten_value).collect();
+    (!parts.is_empty()).then(|| parts.join(" - "))
+}
+
+fn normalize_string_list(slot: Option<&mut Value>, path: &str, report: &mut NormalizationReport) {
+    let Some(value) = slot else {
+        return;
+    };
+    match value {
+        Value::Null => {
+            *value = Value::Array(Vec::new());
+            report.flattened.push(path.to_owned());
+        }
+        Value::String(_) => {
+            let item = value.take();
+            *value = Value::Array(vec![item]);
+            report.flattened.push(path.to_owned());
+        }
+        Value::Array(items) => {
+            let mut normalized = Vec::with_capacity(items.len());
+            for (index, item) in items.drain(..).enumerate() {
+                let item_path = format!("{path}[{index}]");
+                match item {
+                    Value::Null => report.dropped += 1,
+                    Value::String(text) if text.trim().is_empty() => report.dropped += 1,
+                    Value::String(text) => normalized.push(Value::String(text)),
+                    other => match flatten_value(&other) {
+                        Some(text) => {
+                            normalized.push(Value::String(text));
+                            report.flattened.push(item_path);
+                        }
+                        None => report.dropped += 1,
+                    },
+                }
+            }
+            *value = Value::Array(normalized);
+        }
+        ref other => match flatten_value(other) {
+            Some(text) => {
+                *value = Value::Array(vec![Value::String(text)]);
+                report.flattened.push(path.to_owned());
+            }
+            None => {
+                *value = Value::Array(Vec::new());
+                report.dropped += 1;
+            }
+        },
+    }
+}
+
+fn normalize_optional_string(
+    slot: Option<&mut Value>,
+    path: &str,
+    report: &mut NormalizationReport,
+) {
+    let Some(value) = slot else {
+        return;
+    };
+    match value {
+        Value::Null => {}
+        Value::String(text) => {
+            if text.trim().is_empty() {
+                *value = Value::Null;
+                report.flattened.push(path.to_owned());
+            }
+        }
+        ref other => {
+            let flattened = flatten_value(other);
+            *value = flattened.map_or(Value::Null, Value::String);
+            report.flattened.push(path.to_owned());
+        }
+    }
+}
+
+fn normalize_overview(slot: Option<&mut Value>, report: &mut NormalizationReport) {
+    let Some(value) = slot else {
+        return;
+    };
+    match value {
+        Value::String(_) | Value::Null => {}
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().filter_map(flatten_value).collect();
+            let text = parts.join(" ");
+            if text.trim().is_empty() {
+                *value = Value::Null;
+                report.dropped += 1;
+            } else {
+                *value = Value::String(text);
+                report.flattened.push("overview".to_owned());
+            }
+        }
+        ref other => {
+            let flattened = flatten_value(other);
+            *value = flattened.map_or(Value::Null, Value::String);
+            report.flattened.push("overview".to_owned());
+        }
+    }
+}
+
+fn normalize_action_items(slot: Option<&mut Value>, report: &mut NormalizationReport) {
+    let Some(value) = slot else {
+        return;
+    };
+    match value {
+        Value::Null => {
+            *value = Value::Array(Vec::new());
+            report.flattened.push("action_items".to_owned());
+        }
+        Value::Array(items) => {
+            let mut normalized = Vec::with_capacity(items.len());
+            for (index, item) in items.drain(..).enumerate() {
+                let path = format!("action_items[{index}]");
+                match item {
+                    Value::String(text) if !text.trim().is_empty() => {
+                        normalized.push(serde_json::json!({ "text": text }));
+                        report.flattened.push(path);
+                    }
+                    Value::Object(mut object) => {
+                        let text = ["text", "task", "description", "action"]
+                            .iter()
+                            .find_map(|key| object.get(*key).and_then(flatten_value))
+                            .filter(|text| !text.trim().is_empty());
+                        let Some(text) = text else {
+                            report.dropped += 1;
+                            continue;
+                        };
+                        let has_text = object
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.trim().is_empty());
+                        if !has_text {
+                            object.insert("text".to_owned(), Value::String(text));
+                            report.flattened.push(format!("{path}.text"));
+                        }
+                        for field in [
+                            "assignee_speaker_id",
+                            "assignee",
+                            "deadline_phrase",
+                            "normalized_deadline",
+                        ] {
+                            normalize_optional_string(
+                                object.get_mut(field),
+                                &format!("{path}.{field}"),
+                                report,
+                            );
+                        }
+                        normalized.push(Value::Object(object));
+                    }
+                    _ => report.dropped += 1,
+                }
+            }
+            *value = Value::Array(normalized);
+        }
+        _ => {
+            *value = Value::Array(Vec::new());
+            report.dropped += 1;
+        }
+    }
+}
+
+fn normalize_citations(slot: Option<&mut Value>, report: &mut NormalizationReport) {
+    let Some(value) = slot else {
+        return;
+    };
+    match value {
+        Value::Null => {
+            *value = Value::Array(Vec::new());
+            report.flattened.push("citations".to_owned());
+        }
+        Value::Array(items) => {
+            let mut normalized = Vec::with_capacity(items.len());
+            for (index, mut item) in items.drain(..).enumerate() {
+                let path = format!("citations[{index}]");
+                if let Value::Object(object) = &mut item {
+                    for field in ["start_seconds", "end_seconds"] {
+                        normalize_numeric_string(object, field, &path, report);
+                    }
+                    normalize_integer_string(object, "page_number", &path, report);
+                }
+                match serde_json::from_value::<Citation>(item.clone()) {
+                    Ok(_) => normalized.push(item),
+                    Err(_) => report.dropped += 1,
+                }
+            }
+            *value = Value::Array(normalized);
+        }
+        _ => {
+            *value = Value::Array(Vec::new());
+            report.dropped += 1;
+        }
+    }
+}
+
+fn normalize_numeric_string(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+    path: &str,
+    report: &mut NormalizationReport,
+) {
+    let Some(Value::String(text)) = object.get(field) else {
+        return;
+    };
+    let Ok(number) = text.trim().parse::<f64>() else {
+        return;
+    };
+    let Some(number) = serde_json::Number::from_f64(number) else {
+        return;
+    };
+    object.insert(field.to_owned(), Value::Number(number));
+    report.flattened.push(format!("{path}.{field}"));
+}
+
+fn normalize_integer_string(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+    path: &str,
+    report: &mut NormalizationReport,
+) {
+    let Some(Value::String(text)) = object.get(field) else {
+        return;
+    };
+    let Ok(number) = text.trim().parse::<i64>() else {
+        return;
+    };
+    object.insert(field.to_owned(), Value::Number(number.into()));
+    report.flattened.push(format!("{path}.{field}"));
 }
 
 fn clean_title(title: &str) -> Option<String> {
@@ -1445,7 +1799,7 @@ mod tests {
     fn invalid_summary_output() -> String {
         serde_json::json!({
             "title": "Sprint delivery",
-            "overview": "The team agreed on a sprint delivery date.",
+            "overview": null,
             "decisions": ["Ship by Friday"],
             "action_items": [],
             "citations": [],
@@ -1484,7 +1838,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            error.contains("key_concepts[0]"),
+            error.contains("overview"),
             "the error must name the failing field: {error}"
         );
         assert!(error.contains("Raw model output saved to"));
@@ -1570,7 +1924,7 @@ mod tests {
             .summarize_with_provider("m", &snapshot(), &fake, false)
             .unwrap_err();
 
-        assert!(error.contains("summary schema validation failed at key_concepts[0]"));
+        assert!(error.contains("summary schema validation failed at overview"));
         assert!(!error.contains("Raw model output saved"));
     }
 
@@ -1640,5 +1994,252 @@ mod tests {
 
         assert_eq!(revision.revision, 1);
         assert!(!root.path().exists() || failure_files(root.path()).is_empty());
+    }
+
+    fn parse_ok(value: Value) -> (GeneratedSummary, NormalizationReport) {
+        parse_generated_summary(&value.to_string()).expect("payload should parse")
+    }
+
+    fn disclosures(revision: &SummaryRevisionDto) -> Vec<String> {
+        revision
+            .structured_json
+            .get("disclosures")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn structured_list_entries_are_flattened_and_rendered_without_artifacts() {
+        let (summary, report) = parse_ok(serde_json::json!({
+            "overview": "The team covered delivery and scheduling.",
+            "key_concepts": [{"term": "Idempotency", "definition": "same effect twice"}],
+            "important_dates": [{"date": "2026-11-03", "event": "project demo"}],
+            "assignments": [{"task": "Send the report", "assignee": "Ana"}]
+        }));
+
+        assert_eq!(summary.key_concepts, ["Idempotency: same effect twice"]);
+        assert_eq!(summary.important_dates, ["2026-11-03: project demo"]);
+        assert_eq!(summary.assignments, ["Send the report - Ana"]);
+        assert_eq!(report.dropped, 0);
+        assert!(report.flattened.contains(&"key_concepts[0]".to_owned()));
+        let markdown = render_markdown(PromptKind::Generic, &summary);
+        assert!(markdown.contains("- Idempotency: same effect twice"));
+        assert!(markdown.contains("- 2026-11-03: project demo"));
+        assert!(!markdown.contains('{') && !markdown.contains('}'));
+    }
+
+    #[test]
+    fn object_key_order_is_preserved_when_flattening() {
+        let (summary, _) = parse_ok(serde_json::json!({
+            "overview": "Ordering check.",
+            "decisions": [{"zeta": "last", "alpha": "first"}]
+        }));
+
+        assert_eq!(summary.decisions, ["last - first"]);
+    }
+
+    #[test]
+    fn scalar_nested_and_single_string_lists_are_tolerated() {
+        let (summary, report) = parse_ok(serde_json::json!({
+            "overview": "Tolerant shapes.",
+            "decisions": [1, true, ["a", "b"], {"definition": "nested"}],
+            "key_concepts": "Single concept",
+            "assignments": null
+        }));
+
+        assert_eq!(summary.decisions, ["1", "true", "a; b", "nested"]);
+        assert_eq!(summary.key_concepts, ["Single concept"]);
+        assert!(summary.assignments.is_empty());
+        assert_eq!(report.dropped, 0);
+        assert!(report.flattened.contains(&"decisions[0]".to_owned()));
+        assert!(report.flattened.contains(&"decisions[2]".to_owned()));
+        assert!(report.flattened.contains(&"key_concepts".to_owned()));
+        assert!(report.flattened.contains(&"assignments".to_owned()));
+    }
+
+    #[test]
+    fn optional_strings_accept_objects_numbers_and_blank_values() {
+        let (summary, report) = parse_ok(serde_json::json!({
+            "overview": "Assignments.",
+            "action_items": [
+                {
+                    "text": "Ship",
+                    "assignee": {"name": "Ana"},
+                    "deadline_phrase": "   ",
+                    "normalized_deadline": 20261103
+                },
+                {"task": "Send the report", "assignee_speaker_id": 7}
+            ]
+        }));
+
+        assert_eq!(summary.action_items.len(), 2);
+        let first = &summary.action_items[0];
+        assert_eq!(first.assignee.as_deref(), Some("Ana"));
+        assert_eq!(first.deadline_phrase, None);
+        assert_eq!(first.normalized_deadline.as_deref(), Some("20261103"));
+        let second = &summary.action_items[1];
+        assert_eq!(second.text, "Send the report");
+        assert_eq!(second.assignee_speaker_id.as_deref(), Some("7"));
+        assert!(report
+            .flattened
+            .contains(&"action_items[0].deadline_phrase".to_owned()));
+    }
+
+    #[test]
+    fn unusable_action_items_and_citations_are_counted_and_dropped() {
+        let (summary, report) = parse_ok(serde_json::json!({
+            "overview": "Drops.",
+            "action_items": [{"assignee": "Ana"}, {"task": "Do it"}],
+            "citations": [
+                {"kind": "transcript"},
+                {"kind": "transcript", "ref_id": "seg1"}
+            ]
+        }));
+
+        assert_eq!(summary.action_items.len(), 1);
+        assert_eq!(summary.action_items[0].text, "Do it");
+        assert_eq!(summary.citations.len(), 1);
+        assert_eq!(summary.citations[0].ref_id, "seg1");
+        assert_eq!(report.dropped, 2);
+        assert_eq!(
+            normalization_disclosure(&report),
+            REFORMATTED_AND_DROPPED_DISCLOSURE
+        );
+    }
+
+    #[test]
+    fn overview_arrays_and_objects_are_flattened() {
+        let (joined, _) = parse_ok(serde_json::json!({
+            "overview": ["The team shipped.", "Delivery is Friday."]
+        }));
+        assert_eq!(joined.overview, "The team shipped. Delivery is Friday.");
+
+        let (object, report) = parse_ok(serde_json::json!({
+            "overview": {"title": "Delivery", "description": "The team shipped."}
+        }));
+        assert_eq!(object.overview, "Delivery: The team shipped.");
+        assert!(report.flattened.contains(&"overview".to_owned()));
+    }
+
+    #[test]
+    fn numeric_string_citation_fields_are_accepted() {
+        let (summary, report) = parse_ok(serde_json::json!({
+            "overview": "Citations.",
+            "citations": [{
+                "kind": "transcript",
+                "ref_id": "seg1",
+                "start_seconds": "0.5",
+                "end_seconds": "2",
+                "page_number": "3"
+            }]
+        }));
+
+        let citation = &summary.citations[0];
+        assert_eq!(citation.start_seconds, Some(0.5));
+        assert_eq!(citation.end_seconds, Some(2.0));
+        assert_eq!(citation.page_number, Some(3));
+        assert!(report
+            .flattened
+            .contains(&"citations[0].start_seconds".to_owned()));
+        assert!(report
+            .flattened
+            .contains(&"citations[0].page_number".to_owned()));
+    }
+
+    #[test]
+    fn a_correct_payload_produces_no_report_and_no_extra_disclosure() {
+        let db = fixture_db();
+        let service = SummarizationService::new(db);
+        let fake = FakeProvider {
+            response: serde_json::json!({
+                "title": "Sprint delivery",
+                "overview": "The team agreed on a sprint delivery date.",
+                "decisions": ["Ship by Friday"],
+                "action_items": [],
+                "citations": [],
+                "key_concepts": [], "assignments": [], "important_dates": [], "disclosures": []
+            })
+            .to_string(),
+        };
+
+        let revision = service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap();
+
+        assert!(disclosures(&revision).is_empty());
+        assert!(!revision.markdown.contains(REFORMATTED_DISCLOSURE));
+    }
+
+    #[test]
+    fn a_normalized_payload_adds_exactly_one_disclosure() {
+        let db = fixture_db();
+        let service = SummarizationService::new(db);
+        let fake = FakeProvider {
+            response: serde_json::json!({
+                "title": "Sprint delivery",
+                "overview": "The team agreed on a sprint delivery date.",
+                "decisions": ["Ship by Friday"],
+                "action_items": [],
+                "citations": [{"kind": "transcript", "ref_id": "seg1"}],
+                "key_concepts": [{"term": "Sprint", "definition": "a fixed delivery window"}],
+                "assignments": [], "important_dates": [], "disclosures": []
+            })
+            .to_string(),
+        };
+
+        let revision = service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap();
+
+        assert_eq!(disclosures(&revision), [REFORMATTED_DISCLOSURE]);
+        assert!(!revision.markdown.contains('{'));
+        assert!(revision
+            .markdown
+            .contains("- Sprint: a fixed delivery window"));
+    }
+
+    #[test]
+    fn non_json_output_is_still_an_error() {
+        let error = parse_generated_summary("the model rambled without JSON").unwrap_err();
+        assert!(error.message.contains("not JSON"));
+    }
+
+    #[test]
+    fn a_missing_overview_is_still_an_error() {
+        let error =
+            parse_generated_summary(&serde_json::json!({"decisions": []}).to_string()).unwrap_err();
+        assert!(error.message.contains("overview"), "{}", error.message);
+    }
+
+    #[test]
+    fn an_unknown_evidence_reference_is_still_an_error() {
+        let db = fixture_db();
+        let service = SummarizationService::new(db);
+        let fake = FakeProvider {
+            response: serde_json::json!({
+                "title": "Sprint delivery",
+                "overview": "The team agreed on a sprint delivery date.",
+                "action_items": [{
+                    "text": "Ship the sprint",
+                    "evidence_refs": ["ghost-segment"]
+                }],
+                "citations": [],
+                "key_concepts": [], "assignments": [], "important_dates": [], "disclosures": []
+            })
+            .to_string(),
+        };
+
+        let error = service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap_err();
+
+        assert!(error.contains("unknown source"), "{error}");
     }
 }
