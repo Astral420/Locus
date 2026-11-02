@@ -10,7 +10,7 @@ use super::{
     backend::{detect_llama_backend, LlamaBackend},
     engine::resolved_engine,
     llama_cpp::{
-        plan_server, LlamaServerConfig, LlamaServerManager, ServerPlan,
+        plan_server, LlamaServerConfig, LlamaServerManager, ReasoningMode, ServerPlan,
         DEFAULT_GENERATION_CONTEXT,
     },
     model_manager::GenerationModelManager,
@@ -71,10 +71,12 @@ pub fn generation_server_with(
             config.embedding = false;
             config.context_size = Some(DEFAULT_GENERATION_CONTEXT);
             config.llama_backend = Some(backend);
+            config.reasoning = Some(ReasoningMode::Off);
             config.log_path = log_path;
-            let new_server = Arc::new(LlamaServerManager::launch(config).map_err(|error| {
-                format!("the local language engine is unavailable: {error}")
-            })?);
+            let new_server =
+                Arc::new(LlamaServerManager::launch(config).map_err(|error| {
+                    format!("the local language engine is unavailable: {error}")
+                })?);
             let old = guard.replace(Arc::clone(&new_server));
             drop(guard);
             drop(old);
@@ -326,8 +328,8 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         let dir = tempfile::tempdir().unwrap();
         let binary = write_fake_server(dir.path());
         let database = Database::in_memory().unwrap();
-        let manager = GenerationModelManager::new(dir.path().join("models"))
-            .with_database(database.clone());
+        let manager =
+            GenerationModelManager::new(dir.path().join("models")).with_database(database.clone());
         Some(Fixture {
             dir,
             binary,
@@ -447,7 +449,10 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             Ok(_) => panic!("a provider must not be built without a model"),
             Err(error) => error,
         };
-        assert!(error.contains("No local language model is selected"), "{error}");
+        assert!(
+            error.contains("No local language model is selected"),
+            "{error}"
+        );
         assert_eq!(fixture.launches(), 0);
     }
 
@@ -522,4 +527,3 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         assert_eq!(fixture.launches(), 2);
     }
 }
-

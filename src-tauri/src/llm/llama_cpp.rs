@@ -15,6 +15,30 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Controls the `--reasoning` flag passed to `llama-server`. `Auto` is the
+/// server's own default and is equivalent to not passing the flag; `On` and
+/// `Off` force-enable or force-disable thinking-token generation regardless of
+/// the model's chat template defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReasoningMode {
+    /// Let llama-server decide (server default; flag is omitted entirely).
+    Auto,
+    /// Force thinking tokens on (`--reasoning on`).
+    On,
+    /// Force thinking tokens off (`--reasoning off`).
+    Off,
+}
+
+impl ReasoningMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ReasoningMode::Auto => "auto",
+            ReasoningMode::On => "on",
+            ReasoningMode::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LlamaServerConfig {
     pub binary_path: PathBuf,
@@ -23,6 +47,10 @@ pub struct LlamaServerConfig {
     pub port: Option<u16>,
     pub startup_timeout: Duration,
     pub embedding: bool,
+    /// Passed as `--reasoning <mode>` to llama-server. `None` omits the flag
+    /// entirely so the server uses its own default (`auto`). Only meaningful
+    /// for the generation server; the embedding server ignores this field.
+    pub reasoning: Option<ReasoningMode>,
     /// Explicit for packaged variants; `None` performs the same validated
     /// runtime selection as Whisper and falls back to CPU.
     pub gpu_backend: Option<BackendKind>,
@@ -64,6 +92,7 @@ impl LlamaServerConfig {
             port: None,
             startup_timeout: Duration::from_secs(10),
             embedding: false,
+            reasoning: None,
             gpu_backend: None,
             llama_backend: None,
             context_size: None,
@@ -118,6 +147,9 @@ fn base_args(config: &LlamaServerConfig, port: u16) -> Vec<String> {
     }
     if config.embedding {
         args.push("--embedding".into());
+    }
+    if let Some(mode) = &config.reasoning {
+        args.extend(["--reasoning".into(), mode.as_str().into()]);
     }
     args
 }
@@ -660,7 +692,10 @@ impl ChatCompletionsResponse {
             content,
             model: self.model.or(Some(requested_model)),
             prompt_tokens: self.usage.as_ref().and_then(|usage| usage.prompt_tokens),
-            completion_tokens: self.usage.as_ref().and_then(|usage| usage.completion_tokens),
+            completion_tokens: self
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.completion_tokens),
         })
     }
 }
@@ -1371,7 +1406,8 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
     #[test]
     fn a_startup_failure_quotes_the_engine_log_and_never_the_api_token() {
         let dir = tempfile::tempdir().unwrap();
-        let binary = write_named_executable_script(dir.path(), "exiting-server.py", FAKE_SERVER_THAT_EXITS);
+        let binary =
+            write_named_executable_script(dir.path(), "exiting-server.py", FAKE_SERVER_THAT_EXITS);
         let log_path = dir.path().join("logs/llama-generation.log");
         let mut config = config_for_fake_server(&binary);
         config.log_path = Some(log_path.clone());
@@ -1384,7 +1420,10 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         };
         assert!(error.contains("exited during startup"), "{error}");
         assert!(error.contains("failed to load model"), "{error}");
-        assert!(error.contains("unsupported metal device index 7"), "{error}");
+        assert!(
+            error.contains("unsupported metal device index 7"),
+            "{error}"
+        );
 
         let logged = std::fs::read_to_string(&log_path).unwrap_or_default();
         // The bearer token is passed as an argument, so it must never be in the log.
@@ -1409,11 +1448,8 @@ HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let binary = write_named_executable_script(
-            dir.path(),
-            "slow-server.py",
-            FAKE_SERVER_THAT_DELAYS,
-        );
+        let binary =
+            write_named_executable_script(dir.path(), "slow-server.py", FAKE_SERVER_THAT_DELAYS);
         let log_path = dir.path().join("logs/llama-generation.log");
         let mut config = config_for_fake_server(&binary);
         config.log_path = Some(log_path.clone());
