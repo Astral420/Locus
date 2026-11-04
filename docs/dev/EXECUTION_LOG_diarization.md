@@ -191,3 +191,26 @@ re-diarization of existing meetings. Nothing in that ADR is implemented, and no 
    before the engine starts. Acceptable today; chunking or a shorter filter would cut it.
 7. **No expected-speaker plumbing**: `num_speakers` is settable per call and via env, but nothing in
    the app exposes it (deliberately, per B.7).
+
+## Final report
+
+1. Base `9134c55aa88d42521889c78f160c918115930d54`; final `3eec82e8da46c3c1df159ac3b936ab6cfa0f280a`.
+   `dev` did not move while I worked (`origin/dev` was still `9134c55` at the end), so no rebase.
+   Branch `fix/diarization-over-splitting`.
+2. Commits: `8f8a438` sidecar (B1–B3), `eaa440a` Rust alignment (B4), `3eec82e` ADR + this log
+   (B5/B6 record). Files per phase are listed above. Tests added: 9 settings, 10 post-processing,
+   10 input/resampling, 9 Rust (7 alignment + 2 response shape).
+   Suites: pytest `.venv` 20 → 52 passed (2 skipped both times); pytest system `python3` 19 → 51
+   passed (3 skipped both times); cargo 378 → 387 passed, 0 failed, 3 ignored; `pnpm build` ok → ok;
+   `pnpm test` red at baseline (149 failures) and unchanged — no frontend file was touched.
+3. Sweep table above. Defaults unchanged (threshold 0.5, `merge_gap` 0, `min_speaker_seconds` 0)
+   because the only audio in the repository has no known head count.
+4. Docs that disagree with the code: `docs/plans/DESIGN.md` (pyannote-audio +
+   `speaker-diarization-community-1`, lines ~128 and ~471–485) and `PRODUCT.md` ("speaker
+   diarization (pyannote)") versus sherpa-onnx + pyannote segmentation 3.0 + TitaNet-small.
+   Not edited: documentation, separate change.
+5. Per-source diarization: `docs/adr/0009-diarize-per-source.md` written as a proposal; nothing
+   implemented, approval pending. No "expected speakers" UI hint added.
+6. Nothing from the prompt's findings had been fixed on the current `dev`; only `steps.rs` had moved
+   since `5ee777d`, and every referenced function and file still existed under its old name.
+7. "Found but not fixed" above (items 1–7).
