@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..errors import CAPABILITY_UNAVAILABLE, CapabilityUnavailable
-from ..diarization.engine import DiarizationUnavailable, diarize
+from ..diarization.engine import DiarizationUnavailable, diarize, diarize_with_diagnostics
 from ..diarization.vad import vad
 from ..slides.detector import detect_slides
 from ..slides.ocr import ocr_slide
@@ -123,13 +123,21 @@ class JsonRpcServer:
 
     def _diarize(self, params: dict[str, Any], context: RequestContext) -> dict[str, Any]:
         self._require_path(params, "audio_path")
+        # Optional per-call tuning (threshold, head count, minimum turn lengths); additive, so an
+        # older host that sends no settings keeps the shipped defaults.
+        settings = params.get("settings")
         try:
-            segments = diarize(params["audio_path"], bool(params.get("single_person", False)), progress=context.progress)
+            result = diarize_with_diagnostics(
+                params["audio_path"],
+                bool(params.get("single_person", False)),
+                progress=context.progress,
+                settings=settings if isinstance(settings, dict) else None,
+            )
         except DiarizationUnavailable as error:
             # Honest "not available": the host marks the step skipped rather than
             # receiving invented speaker labels.
             return {"segments": [], "unavailable": str(error)}
-        return {"segments": segments}
+        return result
 
     def _detect_slides(self, params: dict[str, Any], context: RequestContext) -> dict[str, Any]:
         self._require_path(params, "video_path")
