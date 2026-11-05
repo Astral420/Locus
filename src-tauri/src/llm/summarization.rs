@@ -176,6 +176,60 @@ pub struct FailureRecord {
     pub completion_tokens: Option<u64>,
     pub message: String,
     pub raw: String,
+    /// Character counts for the prompt that produced this output, rendered as
+    /// one line. Counts only; never transcript or OCR content.
+    pub prompt_stats: Option<String>,
+}
+
+/// Character counts for one summary prompt. Filled while the payload is
+/// composed so the next investigation can see where the budget went without
+/// guessing. It deliberately carries counts, not text.
+#[derive(Debug, Clone, Default)]
+struct PromptStats {
+    path: &'static str,
+    system_chars: usize,
+    primary_chars: usize,
+    slide_chars: usize,
+    slide_chars_available: usize,
+    slides_available: usize,
+    transcript_chars_original: usize,
+    fold_calls_initial: usize,
+    fold_calls_extra: usize,
+    fold_loop_exhausted: bool,
+    prompt_tokens: Option<u64>,
+}
+
+impl PromptStats {
+    fn render_fields(&self) -> String {
+        let prompt_tokens = self
+            .prompt_tokens
+            .map_or_else(|| "?".to_owned(), |tokens| tokens.to_string());
+        format!(
+            "path={} system={} primary={} slides={}/{} folds={}+{} exhausted={} prompt_tokens={}",
+            self.path,
+            self.system_chars,
+            self.primary_chars,
+            self.slide_chars,
+            self.slide_chars_available,
+            self.fold_calls_initial,
+            self.fold_calls_extra,
+            self.fold_loop_exhausted,
+            prompt_tokens,
+        )
+    }
+
+    fn stderr_line(&self) -> String {
+        format!("locus: summary prompt: {}", self.render_fields())
+    }
+
+    fn diagnostic_line(&self) -> String {
+        format!(
+            "{} transcript_original={} slides_available={}",
+            self.render_fields(),
+            self.transcript_chars_original,
+            self.slides_available,
+        )
+    }
 }
 
 impl FailureRecord {
@@ -245,6 +299,9 @@ fn render_failure_record(record: &FailureRecord) -> String {
     );
     if let Some(tokens) = record.completion_tokens {
         text.push_str(&format!("completion_tokens: {tokens}\n"));
+    }
+    if let Some(stats) = &record.prompt_stats {
+        text.push_str(&format!("prompt stats: {stats}\n"));
     }
     if record.truncated_at_max_tokens() {
         text.push_str("WARNING: output may have been truncated at max_tokens\n");
@@ -442,7 +499,7 @@ impl SummarizationService {
         let job_id = self.start_job(meeting_id, snapshot, &route, &context)?;
         let result = self.generate_payload(meeting_id, provider, snapshot, &route, &context);
         let payload = match result {
-            Ok(payload) => payload,
+            Ok((payload, _stats)) => payload,
             Err(error) => {
                 let message = error.to_string();
                 self.finish_job(&job_id, "error", Some(&message));
@@ -706,7 +763,7 @@ impl SummarizationService {
         snapshot: &ProviderSnapshot,
         route: &super::prompts::PromptRoute,
         context: &SummaryContext,
-    ) -> Result<GeneratedSummary, LlmError> {
+    ) -> Result<(GeneratedSummary, PromptStats), LlmError> {
         let transcript = context
             .transcripts
             .iter()
@@ -729,6 +786,19 @@ impl SummarizationService {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let mut stats = PromptStats {
+            path: "single",
+            system_chars: PromptRouter::system_prompt(route.kind).chars().count(),
+            primary_chars: 0,
+            slide_chars: 0,
+            slide_chars_available: slide_text.chars().count(),
+            slides_available: context.slides.len(),
+            transcript_chars_original: transcript.chars().count(),
+            fold_calls_initial: 0,
+            fold_calls_extra: 0,
+            fold_loop_exhausted: false,
+            prompt_tokens: None,
+        };
         let fold = |passage: &str| -> Result<String, LlmError> {
             let request = ChatCompletionRequest {
                 model: snapshot.model.clone(),
@@ -744,31 +814,56 @@ impl SummarizationService {
             };
             provider.complete(&request).map(|response| response.content)
         };
-        let response = if transcript.chars().count() + slide_text.chars().count()
-            <= MAX_SINGLE_CONTEXT_CHARS
-        {
-            self.complete(provider, snapshot, route.kind, &transcript, &slide_text)?
-        } else {
-            let mut notes = char_chunks(&transcript, HIERARCHICAL_CHUNK_CHARS)
-                .into_iter()
-                .map(fold)
-                .collect::<Result<Vec<_>, LlmError>>()?
-                .join("\n\n--- NEXT PASS ---\n\n");
-            // The folded notes are the prompt of the final pass, so they have to
-            // respect the same window the transcript did.
-            let mut passes = 0;
-            while notes.chars().count() + slide_text.chars().count() > MAX_SINGLE_CONTEXT_CHARS
-                && passes < MAX_FOLD_PASSES
+        let response_result = (|| -> Result<ChatCompletionResponse, LlmError> {
+            if transcript.chars().count() + slide_text.chars().count()
+                <= MAX_SINGLE_CONTEXT_CHARS
             {
-                notes = char_chunks(&notes, HIERARCHICAL_CHUNK_CHARS)
+                stats.primary_chars = transcript.chars().count();
+                stats.slide_chars = slide_text.chars().count();
+                self.complete(provider, snapshot, route.kind, &transcript, &slide_text)
+            } else {
+                stats.path = "hierarchical";
+                let initial_chunks = char_chunks(&transcript, HIERARCHICAL_CHUNK_CHARS);
+                stats.fold_calls_initial = initial_chunks.len();
+                let mut notes = initial_chunks
                     .into_iter()
                     .map(fold)
                     .collect::<Result<Vec<_>, LlmError>>()?
                     .join("\n\n--- NEXT PASS ---\n\n");
-                passes += 1;
+                // The folded notes are the prompt of the final pass, so they have to
+                // respect the same window the transcript did.
+                let mut passes = 0;
+                while notes.chars().count() + slide_text.chars().count()
+                    > MAX_SINGLE_CONTEXT_CHARS
+                    && passes < MAX_FOLD_PASSES
+                {
+                    notes = char_chunks(&notes, HIERARCHICAL_CHUNK_CHARS)
+                        .into_iter()
+                        .map(fold)
+                        .collect::<Result<Vec<_>, LlmError>>()?
+                        .join("\n\n--- NEXT PASS ---\n\n");
+                    passes += 1;
+                }
+                stats.fold_calls_extra = passes;
+                stats.fold_loop_exhausted = passes >= MAX_FOLD_PASSES
+                    && notes.chars().count() + slide_text.chars().count()
+                        > MAX_SINGLE_CONTEXT_CHARS;
+                stats.primary_chars = notes.chars().count();
+                stats.slide_chars = slide_text.chars().count();
+                self.complete(provider, snapshot, route.kind, &notes, &slide_text)
             }
-            self.complete(provider, snapshot, route.kind, &notes, &slide_text)?
+        })();
+        let response = match response_result {
+            Ok(response) => {
+                stats.prompt_tokens = response.prompt_tokens;
+                response
+            }
+            Err(error) => {
+                eprintln!("{}", stats.stderr_line());
+                return Err(error);
+            }
         };
+        eprintln!("{}", stats.stderr_line());
         match parse_generated_summary(&response.content) {
             Ok((mut payload, report)) => {
                 if !report.is_empty() {
@@ -791,11 +886,12 @@ impl SummarizationService {
                         snapshot,
                         route,
                         &response,
+                        &stats,
                         &response.content,
                         &message,
                     );
                 }
-                Ok(payload)
+                Ok((payload, stats))
             }
             Err(error) => {
                 let saved = self.record_summary_output(
@@ -803,6 +899,7 @@ impl SummarizationService {
                     snapshot,
                     route,
                     &response,
+                    &stats,
                     &error.raw,
                     &error.message,
                 );
@@ -832,6 +929,7 @@ impl SummarizationService {
         snapshot: &ProviderSnapshot,
         route: &super::prompts::PromptRoute,
         response: &ChatCompletionResponse,
+        stats: &PromptStats,
         raw: &str,
         message: &str,
     ) -> Option<PathBuf> {
@@ -845,6 +943,7 @@ impl SummarizationService {
             completion_tokens: response.completion_tokens,
             message: message.to_owned(),
             raw: raw.to_owned(),
+            prompt_stats: Some(stats.diagnostic_line()),
         };
         self.failure_sink.record(&record)
     }
@@ -1949,6 +2048,7 @@ mod tests {
             completion_tokens: None,
             message: "summary schema validation failed".into(),
             raw: raw.into(),
+            prompt_stats: None,
         }
     }
 
@@ -2389,6 +2489,154 @@ mod tests {
             "key_concepts": [], "assignments": [], "important_dates": [], "disclosures": []
         })
         .to_string()
+    }
+
+    fn add_slides(db: &Database, texts: &[&str]) {
+        let texts = texts.iter().map(|text| text.to_string()).collect::<Vec<_>>();
+        db.run(move |connection| {
+            for (index, text) in texts.iter().enumerate() {
+                connection
+                    .execute(
+                        "INSERT INTO slides(id, meeting_id, image_hash, relative_path, ocr_text) VALUES (?1, 'm', ?2, ?3, ?4)",
+                        (
+                            format!("slide-{index}"),
+                            format!("hash-{index}"),
+                            format!("slides/{index}.png"),
+                            text,
+                        ),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn prompt_stats(
+        db: Database,
+        provider: &dyn CompletionProvider,
+    ) -> PromptStats {
+        let service = SummarizationService::new(db);
+        let context = service.load_context("m").unwrap();
+        let route = PromptRouter::route("", &context.requested_type);
+        let (_, stats) = service
+            .generate_payload("m", provider, &snapshot(), &route, &context)
+            .unwrap();
+        stats
+    }
+
+    #[test]
+    fn oversized_slide_text_exhausts_the_fold_loop() {
+        let db = fixture_db();
+        let screen_text = "browser tab and terminal text ".repeat(500);
+        add_slides(&db, &[screen_text.as_str()]);
+        let provider = FormatCaptureProvider::new(&plain_summary_json());
+
+        let stats = prompt_stats(db, &provider);
+
+        assert_eq!(stats.path, "hierarchical");
+        assert!(stats.slide_chars > MAX_SINGLE_CONTEXT_CHARS);
+        assert!(stats.fold_loop_exhausted);
+        assert!(stats.fold_calls_extra > 0);
+        assert!(stats.fold_calls_extra <= MAX_FOLD_PASSES);
+    }
+
+    #[test]
+    fn a_small_meeting_takes_the_single_path_without_folds() {
+        let db = fixture_db();
+        let provider = FormatCaptureProvider::new(&plain_summary_json());
+
+        let stats = prompt_stats(db, &provider);
+
+        assert_eq!(stats.path, "single");
+        assert_eq!(stats.fold_calls_initial, 0);
+        assert_eq!(stats.fold_calls_extra, 0);
+        assert!(!stats.fold_loop_exhausted);
+        assert_eq!(stats.slides_available, 0);
+    }
+
+    #[test]
+    fn prompt_stats_contain_counts_but_no_transcript_content() {
+        const MARKER: &str = "MARKER_DO_NOT_LEAK_42";
+        let db = fixture_db();
+        db.run(move |connection| {
+            connection
+                .execute(
+                    "UPDATE transcript_segments SET text=?1 WHERE id='seg1'",
+                    [format!("{MARKER} the team agreed to ship the sprint by Friday.")],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        let provider = FormatCaptureProvider::new(&plain_summary_json());
+
+        let stats = prompt_stats(db, &provider);
+        let line = stats.stderr_line();
+
+        assert!(line.starts_with("locus: summary prompt: path=single"));
+        assert!(!line.contains(MARKER), "stats leaked transcript content: {line}");
+        assert!(line.contains(&format!("primary={}", stats.primary_chars)));
+    }
+
+    #[test]
+    fn failure_diagnostics_carry_prompt_stats() {
+        let root = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FileSummaryFailureSink::new(root.path().to_path_buf()));
+        let db = fixture_db();
+        let service = SummarizationService::new(db).with_failure_sink(sink);
+        let fake = FakeProvider {
+            response: invalid_summary_output(),
+        };
+
+        service
+            .summarize_with_provider("m", &snapshot(), &fake, false)
+            .unwrap_err();
+
+        let names = failure_files(root.path());
+        assert_eq!(names.len(), 1);
+        let text = fs::read_to_string(root.path().join(&names[0])).unwrap();
+        assert!(text.contains("prompt stats: path=single"), "{text}");
+    }
+
+    #[test]
+    fn successful_summary_diagnostics_carry_prompt_stats() {
+        // `LOCUS_SUMMARY_DEBUG` writes a successful summary through the same
+        // record path this exercises, so the stats line is covered without
+        // depending on process-wide environment state.
+        let root = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FileSummaryFailureSink::new(root.path().to_path_buf()));
+        let db = fixture_db();
+        let service = SummarizationService::new(db).with_failure_sink(sink);
+        let context = service.load_context("m").unwrap();
+        let route = PromptRouter::route("", &context.requested_type);
+        let stats = PromptStats {
+            path: "single",
+            prompt_tokens: Some(123),
+            ..PromptStats::default()
+        };
+        let response = ChatCompletionResponse {
+            content: plain_summary_json(),
+            model: Some("fake".into()),
+            prompt_tokens: Some(123),
+            completion_tokens: None,
+        };
+
+        let path = service
+            .record_summary_output(
+                "m",
+                &snapshot(),
+                &route,
+                &response,
+                &stats,
+                &response.content,
+                "summary parsed successfully",
+            )
+            .unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("prompt stats: path=single"), "{text}");
+        assert!(text.contains("prompt_tokens=123"), "{text}");
     }
 
     #[test]
