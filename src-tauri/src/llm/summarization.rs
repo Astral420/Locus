@@ -1,6 +1,7 @@
 use super::{
     prompts::{PromptKind, PromptRouter},
     providers::ProviderSnapshot,
+    slide_text::clean_slides,
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionProvider, LlmError,
     ResponseFormat,
 };
@@ -192,6 +193,8 @@ struct PromptStats {
     slide_chars: usize,
     slide_chars_available: usize,
     slides_available: usize,
+    slide_lines_in: usize,
+    slide_lines_out: usize,
     transcript_chars_original: usize,
     fold_calls_initial: usize,
     fold_calls_extra: usize,
@@ -205,12 +208,14 @@ impl PromptStats {
             .prompt_tokens
             .map_or_else(|| "?".to_owned(), |tokens| tokens.to_string());
         format!(
-            "path={} system={} primary={} slides={}/{} folds={}+{} exhausted={} prompt_tokens={}",
+            "path={} system={} primary={} slides={}/{} slide_lines={}/{} folds={}+{} exhausted={} prompt_tokens={}",
             self.path,
             self.system_chars,
             self.primary_chars,
             self.slide_chars,
             self.slide_chars_available,
+            self.slide_lines_out,
+            self.slide_lines_in,
             self.fold_calls_initial,
             self.fold_calls_extra,
             self.fold_loop_exhausted,
@@ -407,10 +412,10 @@ struct TranscriptRow {
 }
 
 #[derive(Debug, Clone)]
-struct SlideRow {
-    id: String,
-    timestamp_seconds: f32,
-    ocr_text: String,
+pub(crate) struct SlideRow {
+    pub(crate) id: String,
+    pub(crate) timestamp_seconds: f32,
+    pub(crate) ocr_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -704,7 +709,7 @@ impl SummarizationService {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| error.to_string())?;
                 let mut slide_statement = connection
-                    .prepare("SELECT id, COALESCE((SELECT timestamp_seconds FROM slide_occurrences WHERE slide_id = slides.id ORDER BY ordinal LIMIT 1), 0), COALESCE(ocr_text, '') FROM slides WHERE meeting_id = ?1 ORDER BY id")
+                    .prepare("SELECT s.id, COALESCE((SELECT so.timestamp_seconds FROM slide_occurrences so WHERE so.slide_id = s.id ORDER BY so.ordinal LIMIT 1), 0), COALESCE(s.ocr_text, '') FROM slides s WHERE s.meeting_id = ?1 ORDER BY 2, (SELECT so.ordinal FROM slide_occurrences so WHERE so.slide_id = s.id ORDER BY so.ordinal LIMIT 1), s.id")
                     .map_err(|error| error.to_string())?;
                 let slides = slide_statement
                     .query_map([&meeting_id], |row| {
@@ -775,7 +780,21 @@ impl SummarizationService {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let slide_text = context
+        let cleaned = clean_slides(&context.slides);
+        let slide_text = cleaned
+            .slides
+            .iter()
+            .map(|slide| {
+                format!(
+                    "[{} @ {:.2}] {}",
+                    slide.id,
+                    slide.timestamp_seconds,
+                    slide.lines.join("\n")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw_slide_text = context
             .slides
             .iter()
             .map(|slide| {
@@ -791,8 +810,10 @@ impl SummarizationService {
             system_chars: PromptRouter::system_prompt(route.kind).chars().count(),
             primary_chars: 0,
             slide_chars: 0,
-            slide_chars_available: slide_text.chars().count(),
+            slide_chars_available: raw_slide_text.chars().count(),
             slides_available: context.slides.len(),
+            slide_lines_in: cleaned.stats.lines_in,
+            slide_lines_out: cleaned.stats.lines_out,
             transcript_chars_original: transcript.chars().count(),
             fold_calls_initial: 0,
             fold_calls_extra: 0,
@@ -815,9 +836,7 @@ impl SummarizationService {
             provider.complete(&request).map(|response| response.content)
         };
         let response_result = (|| -> Result<ChatCompletionResponse, LlmError> {
-            if transcript.chars().count() + slide_text.chars().count()
-                <= MAX_SINGLE_CONTEXT_CHARS
-            {
+            if transcript.chars().count() + slide_text.chars().count() <= MAX_SINGLE_CONTEXT_CHARS {
                 stats.primary_chars = transcript.chars().count();
                 stats.slide_chars = slide_text.chars().count();
                 self.complete(provider, snapshot, route.kind, &transcript, &slide_text)
@@ -833,8 +852,7 @@ impl SummarizationService {
                 // The folded notes are the prompt of the final pass, so they have to
                 // respect the same window the transcript did.
                 let mut passes = 0;
-                while notes.chars().count() + slide_text.chars().count()
-                    > MAX_SINGLE_CONTEXT_CHARS
+                while notes.chars().count() + slide_text.chars().count() > MAX_SINGLE_CONTEXT_CHARS
                     && passes < MAX_FOLD_PASSES
                 {
                     notes = char_chunks(&notes, HIERARCHICAL_CHUNK_CHARS)
@@ -1815,7 +1833,10 @@ mod tests {
             let chunks = char_chunks(&text, 4);
             assert_eq!(chunks.concat(), text);
             for chunk in &chunks {
-                assert!(!chunk.contains('\u{FFFD}'), "chunk lost a character: {chunk:?}");
+                assert!(
+                    !chunk.contains('\u{FFFD}'),
+                    "chunk lost a character: {chunk:?}"
+                );
                 assert!(chunk.chars().count() <= 4, "chunk too long: {chunk:?}");
             }
             assert!(chunks.len() > 1);
@@ -2492,7 +2513,10 @@ mod tests {
     }
 
     fn add_slides(db: &Database, texts: &[&str]) {
-        let texts = texts.iter().map(|text| text.to_string()).collect::<Vec<_>>();
+        let texts = texts
+            .iter()
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>();
         db.run(move |connection| {
             for (index, text) in texts.iter().enumerate() {
                 connection
@@ -2512,10 +2536,7 @@ mod tests {
         .unwrap();
     }
 
-    fn prompt_stats(
-        db: Database,
-        provider: &dyn CompletionProvider,
-    ) -> PromptStats {
+    fn prompt_stats(db: Database, provider: &dyn CompletionProvider) -> PromptStats {
         let service = SummarizationService::new(db);
         let context = service.load_context("m").unwrap();
         let route = PromptRouter::route("", &context.requested_type);
@@ -2563,7 +2584,9 @@ mod tests {
             connection
                 .execute(
                     "UPDATE transcript_segments SET text=?1 WHERE id='seg1'",
-                    [format!("{MARKER} the team agreed to ship the sprint by Friday.")],
+                    [format!(
+                        "{MARKER} the team agreed to ship the sprint by Friday."
+                    )],
                 )
                 .map(|_| ())
                 .map_err(|error| error.to_string())
@@ -2575,7 +2598,10 @@ mod tests {
         let line = stats.stderr_line();
 
         assert!(line.starts_with("locus: summary prompt: path=single"));
-        assert!(!line.contains(MARKER), "stats leaked transcript content: {line}");
+        assert!(
+            !line.contains(MARKER),
+            "stats leaked transcript content: {line}"
+        );
         assert!(line.contains(&format!("primary={}", stats.primary_chars)));
     }
 
@@ -2797,5 +2823,117 @@ mod tests {
         let mut value = sample;
         value.as_object_mut().unwrap().remove("disclosures");
         assert!(!validator.is_valid(&value));
+    }
+
+    #[test]
+    fn slides_reach_the_prompt_in_chronological_order() {
+        let db = fixture_db();
+        // UUID ids sort opposite to their first occurrence timestamps.
+        db.run(|connection| {
+            for (ordinal, (id, timestamp)) in
+                [("zzz", 0.0_f64), ("aaa", 10.0), ("mmm", 20.0)].into_iter().enumerate()
+            {
+                connection
+                    .execute(
+                        "INSERT INTO slides(id, meeting_id, image_hash, relative_path, ocr_text) VALUES (?1, 'm', ?2, ?3, ?4)",
+                        (
+                            id,
+                            format!("hash-{id}"),
+                            format!("slides/{id}.png"),
+                            format!("{id} slide was visible on screen"),
+                        ),
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .execute(
+                        "INSERT INTO slide_occurrences(id, slide_id, meeting_id, ordinal, timestamp_seconds) VALUES (?1, ?2, 'm', ?3, ?4)",
+                        (format!("occ-{id}"), id, ordinal as i64, timestamp),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        struct PromptCaptureProvider {
+            response: String,
+            prompts: std::sync::Mutex<Vec<String>>,
+        }
+        impl CompletionProvider for PromptCaptureProvider {
+            fn complete(
+                &self,
+                request: &ChatCompletionRequest,
+            ) -> Result<ChatCompletionResponse, LlmError> {
+                self.prompts.lock().unwrap().extend(
+                    request
+                        .messages
+                        .iter()
+                        .map(|message| message.content.clone()),
+                );
+                Ok(ChatCompletionResponse {
+                    content: self.response.clone(),
+                    model: Some("fake".into()),
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                })
+            }
+        }
+
+        let provider = PromptCaptureProvider {
+            response: plain_summary_json(),
+            prompts: std::sync::Mutex::new(Vec::new()),
+        };
+        let service = SummarizationService::new(db);
+        let context = service.load_context("m").unwrap();
+        let route = PromptRouter::route("", &context.requested_type);
+        service
+            .generate_payload("m", &provider, &snapshot(), &route, &context)
+            .unwrap();
+
+        let prompt = provider.prompts.lock().unwrap().join("\n");
+        let zzz = prompt.find("[zzz @ 0.00]").unwrap();
+        let aaa = prompt.find("[aaa @ 10.00]").unwrap();
+        let mmm = prompt.find("[mmm @ 20.00]").unwrap();
+        assert!(zzz < aaa && aaa < mmm);
+    }
+
+    #[test]
+    fn citations_of_slides_dropped_from_the_prompt_stay_valid() {
+        let db = fixture_db();
+        add_slides(
+            &db,
+            &[
+                "Menu bar wifi battery clock",
+                "Menu bar wifi battery clock",
+                "Menu bar wifi battery clock",
+            ],
+        );
+        let service = SummarizationService::new(db);
+        let context = service.load_context("m").unwrap();
+        let cleaned = crate::llm::slide_text::clean_slides(&context.slides);
+        assert!(
+            cleaned.slides.is_empty(),
+            "the repeated chrome should vanish"
+        );
+
+        let payload = GeneratedSummary {
+            title: None,
+            overview: "The team met.".into(),
+            action_items: Vec::new(),
+            decisions: Vec::new(),
+            key_concepts: Vec::new(),
+            assignments: Vec::new(),
+            important_dates: Vec::new(),
+            citations: vec![Citation {
+                kind: "slide".into(),
+                ref_id: "slide-1".into(),
+                start_seconds: None,
+                end_seconds: None,
+                page_number: None,
+            }],
+            disclosures: Vec::new(),
+        };
+
+        validate_payload(&payload, &context).unwrap();
     }
 }
