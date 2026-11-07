@@ -14,6 +14,7 @@ pub mod ollama;
 pub mod openai;
 pub mod prompts;
 pub mod providers;
+pub mod slide_text;
 pub mod summarization;
 
 use serde::{Deserialize, Serialize};
