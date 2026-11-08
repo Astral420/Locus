@@ -1,6 +1,7 @@
 use super::{
     prompts::{PromptKind, PromptRouter},
     providers::ProviderSnapshot,
+    slide_source::{build_stats, classify_slide_source, SlideSourceKind},
     slide_text::clean_slides,
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionProvider, LlmError,
     ResponseFormat,
@@ -42,6 +43,12 @@ const SUMMARY_FAILURE_LIMIT: usize = 5;
 const SUMMARY_FAILURE_MAX_BYTES: usize = 64 * 1024;
 /// Opt-in capture of raw output for summaries that parsed successfully.
 const ENV_SUMMARY_DEBUG: &str = "LOCUS_SUMMARY_DEBUG";
+/// The screen-capture decision is log-only by default: nothing user-visible
+/// changes, and the UI needs no knowledge of it. Flipping this on appends one
+/// line to the summary's existing disclosures, which the current markdown
+/// already renders.
+const SHOW_SLIDE_FILTER_DISCLOSURE: bool = false;
+const SLIDE_FILTER_DISCLOSURE: &str = "Screen text was not used because the recording looks like a screen capture rather than slides.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Citation {
@@ -200,6 +207,8 @@ struct PromptStats {
     fold_calls_extra: usize,
     fold_loop_exhausted: bool,
     prompt_tokens: Option<u64>,
+    slide_source: &'static str,
+    slide_source_reason: Option<String>,
 }
 
 impl PromptStats {
@@ -207,7 +216,7 @@ impl PromptStats {
         let prompt_tokens = self
             .prompt_tokens
             .map_or_else(|| "?".to_owned(), |tokens| tokens.to_string());
-        format!(
+        let mut fields = format!(
             "path={} system={} primary={} slides={}/{} slide_lines={}/{} folds={}+{} exhausted={} prompt_tokens={}",
             self.path,
             self.system_chars,
@@ -220,7 +229,14 @@ impl PromptStats {
             self.fold_calls_extra,
             self.fold_loop_exhausted,
             prompt_tokens,
-        )
+        );
+        if !self.slide_source.is_empty() {
+            fields.push_str(&format!(" slide_source={}", self.slide_source));
+            if let Some(reason) = &self.slide_source_reason {
+                fields.push_str(&format!(" slide_reason=\"{reason}\""));
+            }
+        }
+        fields
     }
 
     fn stderr_line(&self) -> String {
@@ -434,6 +450,7 @@ struct SummaryContext {
     transcript_revision_id: String,
     transcripts: Vec<TranscriptRow>,
     slides: Vec<SlideRow>,
+    slide_occurrences: usize,
     optional_states: Vec<OptionalState>,
     speakers: HashMap<String, String>,
 }
@@ -722,6 +739,13 @@ impl SummarizationService {
                     .map_err(|error| error.to_string())?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| error.to_string())?;
+                let slide_occurrences: usize = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM slide_occurrences WHERE meeting_id = ?1",
+                        [&meeting_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())? as usize;
                 let mut job_statement = connection
                     .prepare("SELECT kind, state, reason FROM jobs WHERE meeting_id = ?1 AND (kind LIKE 'diariz%' OR kind LIKE 'slide%' OR kind LIKE 'ocr%') ORDER BY updated_at")
                     .map_err(|error| error.to_string())?;
@@ -754,6 +778,7 @@ impl SummarizationService {
                     transcript_revision_id,
                     transcripts,
                     slides,
+                    slide_occurrences,
                     optional_states,
                     speakers,
                 })
@@ -781,7 +806,7 @@ impl SummarizationService {
             .collect::<Vec<_>>()
             .join("\n");
         let cleaned = clean_slides(&context.slides);
-        let slide_text = cleaned
+        let cleaned_slide_text = cleaned
             .slides
             .iter()
             .map(|slide| {
@@ -805,6 +830,23 @@ impl SummarizationService {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // The classification uses the raw rows: density is the signal, and the
+        // cleaning above already removes repeated chrome.
+        let source_stats = build_stats(
+            &context.slides,
+            context.slide_occurrences,
+            meeting_duration_seconds(context),
+        );
+        let decision = classify_slide_source(&source_stats);
+        let slide_text = if decision.kind == SlideSourceKind::ScreenCapture {
+            eprintln!(
+                "locus: slide text not used (screen capture): {}",
+                decision.reason
+            );
+            String::new()
+        } else {
+            cleaned_slide_text
+        };
         let mut stats = PromptStats {
             path: "single",
             system_chars: PromptRouter::system_prompt(route.kind).chars().count(),
@@ -819,6 +861,8 @@ impl SummarizationService {
             fold_calls_extra: 0,
             fold_loop_exhausted: false,
             prompt_tokens: None,
+            slide_source: decision.kind.as_str(),
+            slide_source_reason: Some(decision.reason.clone()),
         };
         let fold = |passage: &str| -> Result<String, LlmError> {
             let request = ChatCompletionRequest {
@@ -889,6 +933,11 @@ impl SummarizationService {
                         .disclosures
                         .push(normalization_disclosure(&report).to_owned());
                     eprintln!("locus: summary normalized: {}", report.description());
+                }
+                if let Some(disclosure) =
+                    slide_filter_disclosure(SHOW_SLIDE_FILTER_DISCLOSURE, decision.kind)
+                {
+                    payload.disclosures.push(disclosure.to_owned());
                 }
                 if debug_capture_enabled() {
                     let message = if report.is_empty() {
@@ -1190,6 +1239,31 @@ impl SummarizationService {
                 .map_err(|error| error.to_string())
         });
     }
+}
+
+/// The meeting length the slide-rate rule divides by: the last transcript
+/// segment end, falling back to the last slide timestamp. Zero means unknown.
+fn meeting_duration_seconds(context: &SummaryContext) -> f32 {
+    let transcript_end = context
+        .transcripts
+        .iter()
+        .map(|row| row.end_seconds)
+        .fold(0.0_f32, f32::max);
+    if transcript_end > 0.0 {
+        return transcript_end;
+    }
+    context
+        .slides
+        .iter()
+        .map(|row| row.timestamp_seconds)
+        .fold(0.0_f32, f32::max)
+}
+
+/// The optional user-visible disclosure is a single flag so the owner can turn
+/// it on without a new design or a frontend change. `enabled` is passed in so a
+/// test can exercise both settings against the shipping default.
+fn slide_filter_disclosure(enabled: bool, kind: SlideSourceKind) -> Option<&'static str> {
+    (enabled && kind == SlideSourceKind::ScreenCapture).then_some(SLIDE_FILTER_DISCLOSURE)
 }
 
 fn validate_payload(payload: &GeneratedSummary, context: &SummaryContext) -> Result<(), String> {
@@ -2536,6 +2610,148 @@ mod tests {
         .unwrap();
     }
 
+    struct MessageCaptureProvider {
+        response: String,
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CompletionProvider for MessageCaptureProvider {
+        fn complete(
+            &self,
+            request: &ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, LlmError> {
+            self.prompts.lock().unwrap().extend(
+                request
+                    .messages
+                    .iter()
+                    .map(|message| message.content.clone()),
+            );
+            Ok(ChatCompletionResponse {
+                content: self.response.clone(),
+                model: Some("fake".into()),
+                prompt_tokens: None,
+                completion_tokens: None,
+            })
+        }
+    }
+
+    fn screen_capture_slides(db: &Database) {
+        let slides: Vec<String> = (0..5)
+            .map(|index| {
+                format!(
+                    "MARKER{index} {}",
+                    "https://example.com/browser/panel with window and tab text ".repeat(40)
+                )
+            })
+            .collect();
+        let refs: Vec<&str> = slides.iter().map(String::as_str).collect();
+        add_slides(db, &refs);
+    }
+
+    fn generate_captured_prompt(db: Database) -> String {
+        let provider = MessageCaptureProvider {
+            response: plain_summary_json(),
+            prompts: std::sync::Mutex::new(Vec::new()),
+        };
+        let service = SummarizationService::new(db);
+        let context = service.load_context("m").unwrap();
+        let route = PromptRouter::route("", &context.requested_type);
+        service
+            .generate_payload("m", &provider, &snapshot(), &route, &context)
+            .unwrap();
+        let prompt = provider.prompts.lock().unwrap().join("\n");
+        prompt
+    }
+
+    #[test]
+    fn a_screen_capture_prompt_keeps_speech_and_drops_slide_text() {
+        let db = fixture_db();
+        screen_capture_slides(&db);
+
+        let prompt = generate_captured_prompt(db);
+
+        assert!(
+            prompt.contains("We agreed to ship the sprint by Friday."),
+            "the transcript must stay intact"
+        );
+        assert!(
+            !prompt.contains("MARKER0"),
+            "screen text leaked into the prompt"
+        );
+        assert!(
+            !prompt.contains("slide-0"),
+            "slide ids leaked into the prompt"
+        );
+    }
+
+    #[test]
+    fn a_presentation_prompt_still_carries_slide_text() {
+        let db = fixture_db();
+        add_slides(
+            &db,
+            &[
+                "Quarterly revenue grew by eight percent",
+                "The roadmap lists three launches this year",
+                "Hiring starts in the spring quarter",
+            ],
+        );
+
+        let prompt = generate_captured_prompt(db);
+
+        assert!(prompt.contains("Quarterly revenue grew by eight percent"));
+        assert!(prompt.contains("slide-0"));
+    }
+
+    #[test]
+    fn the_slide_filter_disclosure_is_opt_in() {
+        assert_eq!(
+            slide_filter_disclosure(false, SlideSourceKind::ScreenCapture),
+            None
+        );
+        assert_eq!(
+            slide_filter_disclosure(true, SlideSourceKind::Presentation),
+            None
+        );
+        assert_eq!(
+            slide_filter_disclosure(true, SlideSourceKind::ScreenCapture),
+            Some(SLIDE_FILTER_DISCLOSURE)
+        );
+    }
+
+    fn context_with(transcripts: Vec<TranscriptRow>, slides: Vec<SlideRow>) -> SummaryContext {
+        SummaryContext {
+            title_origin: "placeholder".into(),
+            title_revision: 0,
+            current_summary_revision_id: None,
+            requested_type: MeetingType::Auto,
+            transcript_revision_id: "t1".into(),
+            transcripts,
+            slides,
+            slide_occurrences: 1,
+            optional_states: Vec::new(),
+            speakers: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_meeting_duration_prefers_the_transcript_and_falls_back_to_slides() {
+        let slides = vec![SlideRow {
+            id: "s".into(),
+            timestamp_seconds: 75.0,
+            ocr_text: String::new(),
+        }];
+        let mut context = context_with(Vec::new(), slides);
+        assert_eq!(meeting_duration_seconds(&context), 75.0);
+
+        context.transcripts.push(TranscriptRow {
+            id: "seg".into(),
+            start_seconds: 0.0,
+            end_seconds: 12.5,
+            text: "hello".into(),
+        });
+        assert_eq!(meeting_duration_seconds(&context), 12.5);
+    }
+
     fn prompt_stats(db: Database, provider: &dyn CompletionProvider) -> PromptStats {
         let service = SummarizationService::new(db);
         let context = service.load_context("m").unwrap();
@@ -2549,8 +2765,34 @@ mod tests {
     #[test]
     fn oversized_slide_text_exhausts_the_fold_loop() {
         let db = fixture_db();
-        let screen_text = "browser tab and terminal text ".repeat(500);
-        add_slides(&db, &[screen_text.as_str()]);
+        // A text-heavy deck: unique, clean prose lines so cleaning keeps them,
+        // averaging under the 1,200-character screen-capture density.
+        let topics = [
+            "planning", "budget", "hiring", "roadmap", "design", "testing", "release", "support",
+            "metrics", "security", "training",
+        ];
+        // Word markers keep every comparison key distinct; the cleaner maps
+        // digits to `#`, so a numeric slide index would collapse the deck.
+        let markers = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima",
+        ];
+        let deck: Vec<String> = markers
+            .iter()
+            .map(|marker| {
+                topics
+                    .iter()
+                    .map(|topic| {
+                        format!(
+                            "{marker} {topic}: the team reviewed the details and agreed on the next step for the project"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+        let deck_refs: Vec<&str> = deck.iter().map(String::as_str).collect();
+        add_slides(&db, &deck_refs);
         let provider = FormatCaptureProvider::new(&plain_summary_json());
 
         let stats = prompt_stats(db, &provider);
