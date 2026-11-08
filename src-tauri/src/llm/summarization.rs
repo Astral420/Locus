@@ -2,7 +2,7 @@ use super::{
     prompts::{PromptKind, PromptRouter},
     providers::ProviderSnapshot,
     slide_source::{build_stats, classify_slide_source, SlideSourceKind},
-    slide_text::clean_slides,
+    slide_text::{clean_slides, CleanedSlide},
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionProvider, LlmError,
     ResponseFormat,
 };
@@ -25,6 +25,15 @@ use uuid::Uuid;
 /// `DEFAULT_GENERATION_CONTEXT` (8_192), leaving about 1_000 tokens for the
 /// prompt's own instructions and the model's chat template.
 const MAX_SINGLE_CONTEXT_CHARS: usize = 9_000;
+/// Slide text is supplementary, never the primary source. Cap it at about 20%
+/// of the single-pass budget so it can never crowd out the transcript or force
+/// the fold loop to spend model calls shrinking notes to make room for text
+/// that otherwise never shrinks.
+const SLIDE_TEXT_MAX_CHARS: usize = 1_800;
+/// A slide keeps at least this much before it is dropped outright, so a large
+/// deck degrades by dropping later slides rather than truncating every slide to
+/// a useless sliver.
+const SLIDE_TEXT_MIN_PER_SLIDE_CHARS: usize = 150;
 /// One hierarchical passage, small enough that a passage plus its folded note
 /// still fits the same window.
 const HIERARCHICAL_CHUNK_CHARS: usize = 4_000;
@@ -806,19 +815,6 @@ impl SummarizationService {
             .collect::<Vec<_>>()
             .join("\n");
         let cleaned = clean_slides(&context.slides);
-        let cleaned_slide_text = cleaned
-            .slides
-            .iter()
-            .map(|slide| {
-                format!(
-                    "[{} @ {:.2}] {}",
-                    slide.id,
-                    slide.timestamp_seconds,
-                    slide.lines.join("\n")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
         let raw_slide_text = context
             .slides
             .iter()
@@ -845,7 +841,7 @@ impl SummarizationService {
             );
             String::new()
         } else {
-            cleaned_slide_text
+            cap_slide_text(&cleaned.slides, SLIDE_TEXT_MAX_CHARS)
         };
         let mut stats = PromptStats {
             path: "single",
@@ -894,22 +890,49 @@ impl SummarizationService {
                     .collect::<Result<Vec<_>, LlmError>>()?
                     .join("\n\n--- NEXT PASS ---\n\n");
                 // The folded notes are the prompt of the final pass, so they have to
-                // respect the same window the transcript did.
+                // respect the same window the transcript did. The slide text is
+                // capped, so a normal long meeting needs no extra passes.
                 let mut passes = 0;
-                while notes.chars().count() + slide_text.chars().count() > MAX_SINGLE_CONTEXT_CHARS
-                    && passes < MAX_FOLD_PASSES
-                {
-                    notes = char_chunks(&notes, HIERARCHICAL_CHUNK_CHARS)
+                let mut stopped_without_fitting = false;
+                loop {
+                    if notes.chars().count() + slide_text.chars().count()
+                        <= MAX_SINGLE_CONTEXT_CHARS
+                    {
+                        break;
+                    }
+                    if passes >= MAX_FOLD_PASSES {
+                        stopped_without_fitting = true;
+                        break;
+                    }
+                    // Already a single chunk: another fold cannot guarantee a
+                    // smaller prompt, so stop and let the engine report the real
+                    // context error instead of spending a call that cannot help.
+                    if notes.chars().count() <= HIERARCHICAL_CHUNK_CHARS {
+                        break;
+                    }
+                    let before = notes.chars().count();
+                    let folded = char_chunks(&notes, HIERARCHICAL_CHUNK_CHARS)
                         .into_iter()
                         .map(fold)
                         .collect::<Result<Vec<_>, LlmError>>()?
                         .join("\n\n--- NEXT PASS ---\n\n");
                     passes += 1;
+                    if folded.chars().count() >= before {
+                        stopped_without_fitting = true;
+                        notes = folded;
+                        break;
+                    }
+                    notes = folded;
                 }
                 stats.fold_calls_extra = passes;
-                stats.fold_loop_exhausted = passes >= MAX_FOLD_PASSES
-                    && notes.chars().count() + slide_text.chars().count()
-                        > MAX_SINGLE_CONTEXT_CHARS;
+                stats.fold_loop_exhausted = stopped_without_fitting;
+                if stopped_without_fitting {
+                    eprintln!(
+                        "locus: summary fold loop stopped without fitting (notes={} slides={})",
+                        notes.chars().count(),
+                        slide_text.chars().count()
+                    );
+                }
                 stats.primary_chars = notes.chars().count();
                 stats.slide_chars = slide_text.chars().count();
                 self.complete(provider, snapshot, route.kind, &notes, &slide_text)
@@ -1315,6 +1338,75 @@ fn validate_payload(payload: &GeneratedSummary, context: &SummaryContext) -> Res
         }
     }
     Ok(())
+}
+
+/// Render one cleaned slide in the prompt's `[id @ timestamp] text` form.
+fn render_slide(slide: &CleanedSlide) -> String {
+    format!(
+        "[{} @ {:.2}] {}",
+        slide.id,
+        slide.timestamp_seconds,
+        slide.lines.join("\n")
+    )
+}
+
+/// Budget the slide text. Slides stay in chronological order and keep their id
+/// and timestamp; when the total exceeds `max_chars` every kept slide gets an
+/// equal share and is cut at a line boundary. Slides that cannot get the
+/// per-slide minimum are dropped rather than truncated to nothing.
+fn cap_slide_text(slides: &[CleanedSlide], max_chars: usize) -> String {
+    if slides.is_empty() {
+        return String::new();
+    }
+    let rendered = slides.iter().map(render_slide).collect::<Vec<_>>();
+    let joined_chars = rendered
+        .iter()
+        .map(|text| text.chars().count())
+        .sum::<usize>()
+        + slides.len().saturating_sub(1);
+    if joined_chars <= max_chars {
+        return rendered.join("\n");
+    }
+
+    // Each kept slide needs its share plus one separator. Solving for the
+    // largest count that still honours the minimum keeps the whole result
+    // within the cap without an after-the-fact truncation.
+    let affordable = ((max_chars + 1) / (SLIDE_TEXT_MIN_PER_SLIDE_CHARS + 1))
+        .max(1)
+        .min(slides.len());
+    let share = (max_chars.saturating_sub(affordable.saturating_sub(1))) / affordable;
+    let mut capped = Vec::with_capacity(affordable);
+    for text in rendered.iter().take(affordable) {
+        let cut = truncate_at_line_boundary(text, share);
+        if !cut.is_empty() {
+            capped.push(cut);
+        }
+    }
+    capped.join("\n")
+}
+
+/// Longest prefix of `text` ending on a line boundary within `max_chars`
+/// characters. Never splits a line or a multi-byte character; an entry whose
+/// first line already exceeds the share yields an empty string.
+fn truncate_at_line_boundary(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut boundary = None;
+    let mut used = 0;
+    for (byte, character) in text.char_indices() {
+        if used == max_chars {
+            break;
+        }
+        used += 1;
+        if character == '\n' {
+            boundary = Some(byte + character.len_utf8());
+        }
+    }
+    match boundary {
+        Some(end) => text[..end].trim_end_matches('\n').to_owned(),
+        None => String::new(),
+    }
 }
 
 /// Split at character boundaries, never inside a multi-byte character. Slicing
@@ -2545,6 +2637,16 @@ mod tests {
         fn formats(&self) -> Vec<Option<ResponseFormat>> {
             self.formats.lock().unwrap().clone()
         }
+
+        /// Folding passes carry no response format; the final summary does.
+        fn fold_calls(&self) -> usize {
+            self.formats
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|format| format.is_none())
+                .count()
+        }
     }
 
     impl CompletionProvider for FormatCaptureProvider {
@@ -2762,22 +2864,31 @@ mod tests {
         stats
     }
 
-    #[test]
-    fn oversized_slide_text_exhausts_the_fold_loop() {
-        let db = fixture_db();
-        // A text-heavy deck: unique, clean prose lines so cleaning keeps them,
-        // averaging under the 1,200-character screen-capture density.
-        let topics = [
-            "planning", "budget", "hiring", "roadmap", "design", "testing", "release", "support",
-            "metrics", "security", "training",
-        ];
+    /// A text-heavy deck with unique prose lines so cleaning keeps them, sized
+    /// like the measured meeting (over 12,181 characters) while staying under
+    /// the 1,200-character average that would classify it as a screen capture.
+    fn large_presentation_deck() -> Vec<String> {
         // Word markers keep every comparison key distinct; the cleaner maps
         // digits to `#`, so a numeric slide index would collapse the deck.
         let markers = [
             "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
             "juliet", "kilo", "lima",
         ];
-        let deck: Vec<String> = markers
+        let topics = [
+            "planning",
+            "budget",
+            "hiring",
+            "roadmap",
+            "design",
+            "testing",
+            "release",
+            "support",
+            "metrics",
+            "security",
+            "training",
+            "compliance",
+        ];
+        markers
             .iter()
             .map(|marker| {
                 topics
@@ -2790,18 +2901,209 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("\n")
             })
+            .collect()
+    }
+
+    fn add_large_presentation_deck(db: &Database) {
+        let deck = large_presentation_deck();
+        let refs: Vec<&str> = deck.iter().map(String::as_str).collect();
+        add_slides(db, &refs);
+    }
+
+    fn set_transcript_text(db: &Database, text: String) {
+        db.run(move |connection| {
+            connection
+                .execute(
+                    "UPDATE transcript_segments SET text=?1 WHERE id='seg1'",
+                    [text],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    }
+
+    fn long_transcript() -> String {
+        "the team discussed the roadmap and agreed on the next steps. ".repeat(300)
+    }
+
+    fn cleaned_slide(id: &str, timestamp_seconds: f32, lines: Vec<String>) -> CleanedSlide {
+        CleanedSlide {
+            id: id.to_owned(),
+            timestamp_seconds,
+            lines,
+        }
+    }
+
+    #[test]
+    fn slide_cap_is_a_no_op_when_the_text_already_fits() {
+        let slides = vec![
+            cleaned_slide(
+                "s1",
+                1.0,
+                vec!["first slide line".into(), "second line".into()],
+            ),
+            cleaned_slide("s2", 2.5, vec!["later slide".into()]),
+        ];
+        let expected = slides
+            .iter()
+            .map(render_slide)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(cap_slide_text(&slides, SLIDE_TEXT_MAX_CHARS), expected);
+    }
+
+    #[test]
+    fn slide_cap_budgets_a_large_deck_and_keeps_it_ordered() {
+        let slides = (0..20)
+            .map(|index| {
+                cleaned_slide(
+                    &format!("slide-{index:02}"),
+                    index as f32,
+                    (0..12)
+                        .map(|line| {
+                            format!(
+                                "slide {index} line {line} with enough prose to matter for the budget"
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let total: usize = slides
+            .iter()
+            .map(|slide| render_slide(slide).chars().count())
+            .sum();
+        assert!(total > SLIDE_TEXT_MAX_CHARS);
+
+        let capped = cap_slide_text(&slides, SLIDE_TEXT_MAX_CHARS);
+
+        assert!(!capped.is_empty());
+        assert!(capped.chars().count() <= SLIDE_TEXT_MAX_CHARS);
+        let order: Vec<usize> = capped
+            .match_indices("[slide-")
+            .map(|(index, _)| capped[index + 7..index + 9].parse::<usize>().unwrap())
             .collect();
-        let deck_refs: Vec<&str> = deck.iter().map(String::as_str).collect();
-        add_slides(&db, &deck_refs);
+        assert!(
+            order.len() < slides.len(),
+            "the cap should drop late slides"
+        );
+        assert!(
+            order.windows(2).all(|pair| pair[0] <= pair[1]),
+            "slides lost chronological order: {order:?}"
+        );
+        assert!(capped.contains("[slide-00 @ 0.00]"));
+        assert!(capped.contains("[slide-01 @ 1.00]"));
+    }
+
+    #[test]
+    fn slide_cap_never_cuts_through_a_multibyte_character() {
+        for sample in ["日本語のテキストです", "café niçoise déjà vu"] {
+            let slides = vec![cleaned_slide(
+                "s0",
+                0.0,
+                (0..200).map(|_| sample.to_owned()).collect(),
+            )];
+
+            let capped = cap_slide_text(&slides, 500);
+
+            assert!(capped.chars().count() <= 500);
+            assert!(!capped.contains('\u{FFFD}'));
+            let lines = capped.lines().collect::<Vec<_>>();
+            assert_eq!(lines[0], format!("[s0 @ 0.00] {sample}"));
+            for line in &lines[1..] {
+                assert_eq!(*line, sample, "a partial line survived the cut");
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_slide_text_is_capped_and_does_not_exhaust_the_fold_loop() {
+        let db = fixture_db();
+        add_large_presentation_deck(&db);
+        let provider = FormatCaptureProvider::new(&plain_summary_json());
+
+        let stats = prompt_stats(db, &provider);
+
+        assert_eq!(stats.path, "single");
+        assert!(
+            stats.slide_chars_available > 12_181,
+            "fixture should match the measured meeting size, got {}",
+            stats.slide_chars_available
+        );
+        assert!(stats.slide_chars <= SLIDE_TEXT_MAX_CHARS);
+        assert_eq!(stats.fold_calls_initial, 0);
+        assert_eq!(stats.fold_calls_extra, 0);
+        assert!(!stats.fold_loop_exhausted);
+        assert_eq!(provider.fold_calls(), 0);
+    }
+
+    #[test]
+    fn huge_slide_text_does_not_add_fold_passes_to_a_long_transcript() {
+        let db = fixture_db();
+        add_large_presentation_deck(&db);
+        set_transcript_text(&db, long_transcript());
         let provider = FormatCaptureProvider::new(&plain_summary_json());
 
         let stats = prompt_stats(db, &provider);
 
         assert_eq!(stats.path, "hierarchical");
-        assert!(stats.slide_chars > MAX_SINGLE_CONTEXT_CHARS);
+        assert!(stats.fold_calls_initial > 1);
+        assert!(stats.slide_chars <= SLIDE_TEXT_MAX_CHARS);
+        assert_eq!(stats.fold_calls_extra, 0);
+        assert_eq!(provider.fold_calls(), stats.fold_calls_initial);
+        assert!(!stats.fold_loop_exhausted);
+    }
+
+    struct EchoProvider {
+        summary: String,
+    }
+    impl CompletionProvider for EchoProvider {
+        fn complete(
+            &self,
+            request: &ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, LlmError> {
+            let is_fold = request.messages.iter().any(|message| {
+                message
+                    .content
+                    .starts_with("Summarize this sequential transcript passage")
+            });
+            Ok(ChatCompletionResponse {
+                content: if is_fold {
+                    request
+                        .messages
+                        .last()
+                        .map(|message| message.content.clone())
+                        .unwrap_or_default()
+                } else {
+                    self.summary.clone()
+                },
+                model: Some("fake".into()),
+                prompt_tokens: None,
+                completion_tokens: None,
+            })
+        }
+    }
+
+    #[test]
+    fn fold_loop_terminates_when_notes_cannot_shrink() {
+        let db = fixture_db();
+        add_large_presentation_deck(&db);
+        set_transcript_text(&db, long_transcript());
+        let provider = EchoProvider {
+            summary: plain_summary_json(),
+        };
+
+        let stats = prompt_stats(db, &provider);
+
+        assert_eq!(stats.path, "hierarchical");
+        assert!(
+            stats.fold_calls_extra <= 1,
+            "the loop kept folding against a provider that cannot shrink: {}",
+            stats.fold_calls_extra
+        );
         assert!(stats.fold_loop_exhausted);
-        assert!(stats.fold_calls_extra > 0);
-        assert!(stats.fold_calls_extra <= MAX_FOLD_PASSES);
     }
 
     #[test]
