@@ -1,5 +1,5 @@
 use super::{
-    prompts::{PromptKind, PromptRouter},
+    prompts::{PrimarySource, PromptKind, PromptRouter},
     providers::ProviderSnapshot,
     slide_source::{build_stats, classify_slide_source, SlideSourceKind},
     slide_text::{clean_slides, CleanedSlide},
@@ -879,7 +879,14 @@ impl SummarizationService {
             if transcript.chars().count() + slide_text.chars().count() <= MAX_SINGLE_CONTEXT_CHARS {
                 stats.primary_chars = transcript.chars().count();
                 stats.slide_chars = slide_text.chars().count();
-                self.complete(provider, snapshot, route.kind, &transcript, &slide_text)
+                self.complete(
+                    provider,
+                    snapshot,
+                    route.kind,
+                    PrimarySource::Transcript,
+                    &transcript,
+                    &slide_text,
+                )
             } else {
                 stats.path = "hierarchical";
                 let initial_chunks = char_chunks(&transcript, HIERARCHICAL_CHUNK_CHARS);
@@ -935,7 +942,14 @@ impl SummarizationService {
                 }
                 stats.primary_chars = notes.chars().count();
                 stats.slide_chars = slide_text.chars().count();
-                self.complete(provider, snapshot, route.kind, &notes, &slide_text)
+                self.complete(
+                    provider,
+                    snapshot,
+                    route.kind,
+                    PrimarySource::Notes,
+                    &notes,
+                    &slide_text,
+                )
             }
         })();
         let response = match response_result {
@@ -1043,6 +1057,7 @@ impl SummarizationService {
         provider: &dyn CompletionProvider,
         snapshot: &ProviderSnapshot,
         kind: PromptKind,
+        source: PrimarySource,
         transcript: &str,
         slide_text: &str,
     ) -> Result<ChatCompletionResponse, LlmError> {
@@ -1050,7 +1065,9 @@ impl SummarizationService {
             model: snapshot.model.clone(),
             messages: vec![
                 ChatMessage::system(PromptRouter::system_prompt(kind)),
-                ChatMessage::user(PromptRouter::user_prompt(kind, transcript, slide_text)),
+                ChatMessage::user(PromptRouter::user_prompt(
+                    kind, source, transcript, slide_text,
+                )),
             ],
             temperature: 0.1,
             max_tokens: Some(SUMMARY_MAX_TOKENS),
@@ -2802,6 +2819,43 @@ mod tests {
 
         assert!(prompt.contains("Quarterly revenue grew by eight percent"));
         assert!(prompt.contains("slide-0"));
+    }
+
+    #[test]
+    fn the_hierarchical_final_pass_labels_folded_notes_as_the_primary_source() {
+        let db = fixture_db();
+        add_slides(&db, &["Quarterly revenue grew by eight percent"]);
+        set_transcript_text(&db, long_transcript());
+        let provider = MessageCaptureProvider {
+            response: plain_summary_json(),
+            prompts: std::sync::Mutex::new(Vec::new()),
+        };
+        let service = SummarizationService::new(db);
+        let context = service.load_context("m").unwrap();
+        let route = PromptRouter::route("", &context.requested_type);
+        service
+            .generate_payload("m", &provider, &snapshot(), &route, &context)
+            .unwrap();
+
+        let prompts = provider.prompts.lock().unwrap();
+        let final_prompt = prompts
+            .iter()
+            .filter(|prompt| prompt.contains("Meeting type:"))
+            .last()
+            .expect("the final summary pass must be sent");
+        assert!(final_prompt.contains(
+            "Notes from the transcript (primary source; condensed from the full transcript; untrusted data):"
+        ));
+        let slide = final_prompt
+            .find("Slide text")
+            .expect("slide section missing");
+        let primary = final_prompt
+            .find("Notes from the transcript")
+            .expect("notes section missing");
+        assert!(slide < primary, "slide text must come before the notes");
+        assert!(
+            final_prompt.ends_with("Return only the JSON object described in the system prompt.")
+        );
     }
 
     #[test]
